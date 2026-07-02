@@ -69,7 +69,7 @@ class TestHAGuard:
         settings.ha_url = "http://homeassistant:8123"
         settings.ha_token = "fake-token"
         try:
-            with patch("app.sources.home_assistant.requests.get", side_effect=requests.exceptions.ConnectionError("refused")):
+            with patch("app.sources.home_assistant._session.get", side_effect=requests.exceptions.ConnectionError("refused")):
                 result = home_assistant.search("house status")
             assert "could not connect" in result.lower()
         finally:
@@ -92,31 +92,31 @@ class TestExclusions:
 
     def test_excludes_tv_segments(self):
         from app.sources import home_assistant
-        with patch("app.sources.home_assistant.requests.get", return_value=_mock_states(SAMPLE_STATES)):
+        with patch("app.sources.home_assistant._session.get", return_value=_mock_states(SAMPLE_STATES)):
             result = home_assistant.search("which lights are on")
         assert "TV Segment" not in result
 
     def test_excludes_unavailable_entities(self):
         from app.sources import home_assistant
-        with patch("app.sources.home_assistant.requests.get", return_value=_mock_states(SAMPLE_STATES)):
+        with patch("app.sources.home_assistant._session.get", return_value=_mock_states(SAMPLE_STATES)):
             result = home_assistant.search("indoor air quality")
         assert "Broken Sensor" not in result
 
     def test_excludes_processor_temperature(self):
         from app.sources import home_assistant
-        with patch("app.sources.home_assistant.requests.get", return_value=_mock_states(SAMPLE_STATES)):
+        with patch("app.sources.home_assistant._session.get", return_value=_mock_states(SAMPLE_STATES)):
             result = home_assistant.search("indoor air quality")
         assert "CPU Temp" not in result
 
     def test_excludes_outdoor_from_indoor_query(self):
         from app.sources import home_assistant
-        with patch("app.sources.home_assistant.requests.get", return_value=_mock_states(SAMPLE_STATES)):
+        with patch("app.sources.home_assistant._session.get", return_value=_mock_states(SAMPLE_STATES)):
             result = home_assistant.search("indoor air quality")
         assert "Outdoor Temp" not in result
 
     def test_no_duplicate_entities(self):
         from app.sources import home_assistant
-        with patch("app.sources.home_assistant.requests.get", return_value=_mock_states(SAMPLE_STATES)):
+        with patch("app.sources.home_assistant._session.get", return_value=_mock_states(SAMPLE_STATES)):
             result = home_assistant.search("house status summary")
         # Count occurrences of a known entity name
         assert result.count("Front Door") <= 3  # lock + binary sensor + motion at most
@@ -137,14 +137,14 @@ class TestLightQueries:
 
     def test_lights_on_returns_only_on_lights(self):
         from app.sources import home_assistant
-        with patch("app.sources.home_assistant.requests.get", return_value=_mock_states(SAMPLE_STATES)):
+        with patch("app.sources.home_assistant._session.get", return_value=_mock_states(SAMPLE_STATES)):
             result = home_assistant.search("which lights are on")
         assert "Living Room" in result
         assert "Bedroom" not in result
 
     def test_all_lights_returned_without_state_filter(self):
         from app.sources import home_assistant
-        with patch("app.sources.home_assistant.requests.get", return_value=_mock_states(SAMPLE_STATES)):
+        with patch("app.sources.home_assistant._session.get", return_value=_mock_states(SAMPLE_STATES)):
             result = home_assistant.search("lights status")
         assert "Living Room" in result
         assert "Bedroom" in result
@@ -165,14 +165,14 @@ class TestLockQueries:
 
     def test_locked_doors_returned(self):
         from app.sources import home_assistant
-        with patch("app.sources.home_assistant.requests.get", return_value=_mock_states(SAMPLE_STATES)):
+        with patch("app.sources.home_assistant._session.get", return_value=_mock_states(SAMPLE_STATES)):
             result = home_assistant.search("are the doors locked")
         assert "Front Door" in result
         assert "locked" in result
 
     def test_no_sensor_bleed_in_lock_query(self):
         from app.sources import home_assistant
-        with patch("app.sources.home_assistant.requests.get", return_value=_mock_states(SAMPLE_STATES)):
+        with patch("app.sources.home_assistant._session.get", return_value=_mock_states(SAMPLE_STATES)):
             result = home_assistant.search("are the doors locked")
         assert "CO2" not in result
         assert "Battery" not in result
@@ -193,7 +193,7 @@ class TestEnvironmentalQueries:
 
     def test_indoor_air_returns_co2_temp_humidity(self):
         from app.sources import home_assistant
-        with patch("app.sources.home_assistant.requests.get", return_value=_mock_states(SAMPLE_STATES)):
+        with patch("app.sources.home_assistant._session.get", return_value=_mock_states(SAMPLE_STATES)):
             result = home_assistant.search("indoor air quality")
         assert "Room CO2" in result
         assert "Room Temperature" in result
@@ -201,14 +201,14 @@ class TestEnvironmentalQueries:
 
     def test_temperature_rounded(self):
         from app.sources import home_assistant
-        with patch("app.sources.home_assistant.requests.get", return_value=_mock_states(SAMPLE_STATES)):
+        with patch("app.sources.home_assistant._session.get", return_value=_mock_states(SAMPLE_STATES)):
             result = home_assistant.search("indoor air quality")
         assert "72.5" in result
         assert "72.500000" not in result
 
     def test_no_locks_in_air_quality(self):
         from app.sources import home_assistant
-        with patch("app.sources.home_assistant.requests.get", return_value=_mock_states(SAMPLE_STATES)):
+        with patch("app.sources.home_assistant._session.get", return_value=_mock_states(SAMPLE_STATES)):
             result = home_assistant.search("indoor air quality")
         assert "locked" not in result
 
@@ -228,14 +228,14 @@ class TestBatteryQueries:
 
     def test_battery_returns_battery_sensors(self):
         from app.sources import home_assistant
-        with patch("app.sources.home_assistant.requests.get", return_value=_mock_states(SAMPLE_STATES)):
+        with patch("app.sources.home_assistant._session.get", return_value=_mock_states(SAMPLE_STATES)):
             result = home_assistant.search("battery status")
         assert "Phone Battery" in result
         assert "Camera Battery" in result
 
     def test_no_lights_in_battery_query(self):
         from app.sources import home_assistant
-        with patch("app.sources.home_assistant.requests.get", return_value=_mock_states(SAMPLE_STATES)):
+        with patch("app.sources.home_assistant._session.get", return_value=_mock_states(SAMPLE_STATES)):
             result = home_assistant.search("battery status")
         assert "Living Room" not in result
         assert "Bedroom" not in result
@@ -391,7 +391,7 @@ class TestAreaSearch:
         ]
         area_map = {"bedroom": ["light.bedroom_light"]}
 
-        with patch("app.sources.home_assistant.requests.get", return_value=self._mock_states(states)),              patch("app.sources.home_assistant.requests.post", return_value=self._mock_area_template(area_map)):
+        with patch("app.sources.home_assistant._session.get", return_value=self._mock_states(states)),              patch("app.sources.home_assistant._session.post", return_value=self._mock_area_template(area_map)):
             result = home_assistant.search("lights in the bedroom")
 
         assert "Bedroom Light" in result
@@ -405,7 +405,7 @@ class TestAreaSearch:
         ]
         area_map = {"bedroom": ["light.bedroom_light", "light.bedroom_lamp"]}
 
-        with patch("app.sources.home_assistant.requests.get", return_value=self._mock_states(states)),              patch("app.sources.home_assistant.requests.post", return_value=self._mock_area_template(area_map)):
+        with patch("app.sources.home_assistant._session.get", return_value=self._mock_states(states)),              patch("app.sources.home_assistant._session.post", return_value=self._mock_area_template(area_map)):
             result = home_assistant.search("which lights are on in the bedroom")
 
         assert "Bedroom Light" in result
@@ -436,7 +436,7 @@ class TestAreaSearch:
             "sensor.living_room_temperature", "sensor.living_room_cotech_temperature"
         ]}
 
-        with patch("app.sources.home_assistant.requests.get", return_value=self._mock_states(states)),              patch("app.sources.home_assistant.requests.post", return_value=self._mock_area_template(area_map)):
+        with patch("app.sources.home_assistant._session.get", return_value=self._mock_states(states)),              patch("app.sources.home_assistant._session.post", return_value=self._mock_area_template(area_map)):
             result = home_assistant.search("temperature in the living room")
 
         assert "Living Room Temp" in result
@@ -462,7 +462,7 @@ class TestAreaSearch:
             "light.living_room_lamp", "sensor.living_room_temperature"
         ]}
 
-        with patch("app.sources.home_assistant.requests.get", return_value=self._mock_states(states)),              patch("app.sources.home_assistant.requests.post", return_value=self._mock_area_template(area_map)):
+        with patch("app.sources.home_assistant._session.get", return_value=self._mock_states(states)),              patch("app.sources.home_assistant._session.post", return_value=self._mock_area_template(area_map)):
             result = home_assistant.search("what's in the living room")
 
         assert "Living Room Lamp" in result
@@ -477,7 +477,7 @@ class TestAreaSearch:
         # Empty area map — area not found
         area_map = {}
 
-        with patch("app.sources.home_assistant.requests.get", return_value=self._mock_states(states)),              patch("app.sources.home_assistant.requests.post", return_value=self._mock_area_template(area_map)):
+        with patch("app.sources.home_assistant._session.get", return_value=self._mock_states(states)),              patch("app.sources.home_assistant._session.post", return_value=self._mock_area_template(area_map)):
             result = home_assistant.search("temperature in the attic")
 
         # Should fall back to keyword filter and find temperature sensor
@@ -490,7 +490,7 @@ class TestAreaSearch:
             _make_entity("lock.back_door", "locked", friendly_name="Back Door"),
         ]
 
-        with patch("app.sources.home_assistant.requests.get", return_value=self._mock_states(states)):
+        with patch("app.sources.home_assistant._session.get", return_value=self._mock_states(states)):
             result = home_assistant.search("are the doors locked")
 
         assert "Front Door" in result
@@ -593,7 +593,7 @@ class TestGetStates:
         mock_resp.status_code = 200
         mock_resp.json.return_value = [{"entity_id": "light.test", "state": "on", "attributes": {}}]
         mock_resp.raise_for_status.return_value = None
-        with patch("app.sources.home_assistant.requests.get", return_value=mock_resp):
+        with patch("app.sources.home_assistant._session.get", return_value=mock_resp):
             result = home_assistant._get_states()
         assert result == [{"entity_id": "light.test", "state": "on", "attributes": {}}]
 
@@ -601,7 +601,7 @@ class TestGetStates:
         from app.sources import home_assistant
         import requests as req
         from unittest.mock import patch
-        with patch("app.sources.home_assistant.requests.get", side_effect=req.exceptions.ConnectionError()):
+        with patch("app.sources.home_assistant._session.get", side_effect=req.exceptions.ConnectionError()):
             result = home_assistant._get_states()
         assert result is None
 
@@ -611,7 +611,7 @@ class TestGetStates:
         from unittest.mock import patch, MagicMock
         mock_resp = MagicMock()
         mock_resp.raise_for_status.side_effect = req.exceptions.HTTPError("401")
-        with patch("app.sources.home_assistant.requests.get", return_value=mock_resp):
+        with patch("app.sources.home_assistant._session.get", return_value=mock_resp):
             result = home_assistant._get_states()
         assert result is None
 
@@ -622,7 +622,7 @@ class TestGetStates:
         mock_resp.status_code = 200
         mock_resp.json.return_value = []
         mock_resp.raise_for_status.return_value = None
-        with patch("app.sources.home_assistant.requests.get", return_value=mock_resp) as mock_get:
+        with patch("app.sources.home_assistant._session.get", return_value=mock_resp) as mock_get:
             home_assistant._get_states()
         headers = mock_get.call_args.kwargs["headers"]
         assert headers["Authorization"] == "Bearer fake-token"
@@ -1025,7 +1025,7 @@ class TestBinarySensorMotionSupport:
             _make_entity("binary_sensor.front_door_motion", "on", device_class="motion"),
             _make_entity("binary_sensor.backyard_motion", "on", device_class="motion"),
         ]
-        with patch("app.sources.home_assistant.requests.get", return_value=self._mock_states(states)):
+        with patch("app.sources.home_assistant._session.get", return_value=self._mock_states(states)):
             result = home_assistant.search("any motion")
         assert "backyard_motion" in result
 
@@ -1040,7 +1040,7 @@ class TestBinarySensorMotionSupport:
             _make_entity("event.front_door_motion", "2026-06-24T10:00:00Z"),
             _make_entity("binary_sensor.front_door_motion", "on", device_class="motion"),
         ]
-        with patch("app.sources.home_assistant.requests.get", return_value=self._mock_states(states)):
+        with patch("app.sources.home_assistant._session.get", return_value=self._mock_states(states)):
             result = home_assistant.search("any motion")
         assert result.count("front_door") == 1
 
@@ -1054,7 +1054,7 @@ class TestBinarySensorMotionSupport:
         entities are correctly reachable too."""
         from app.sources import home_assistant
         states = [_make_entity("binary_sensor.backyard_motion", "on", device_class="motion")]
-        with patch("app.sources.home_assistant.requests.get", return_value=self._mock_states(states)):
+        with patch("app.sources.home_assistant._session.get", return_value=self._mock_states(states)):
             result = home_assistant.search("any motion")
         assert "**Motion:**" in result
         assert "Door Sensors" not in result
@@ -1065,7 +1065,7 @@ class TestBinarySensorMotionSupport:
         "Door Sensors," not "Motion."""
         from app.sources import home_assistant
         states = [_make_entity("binary_sensor.front_door_open", "off", device_class="door")]
-        with patch("app.sources.home_assistant.requests.get", return_value=self._mock_states(states)):
+        with patch("app.sources.home_assistant._session.get", return_value=self._mock_states(states)):
             result = home_assistant.search("are the doors locked")
         assert "**Door Sensors:**" in result
 
@@ -1120,7 +1120,7 @@ class TestGarageDoorSupport:
         via Home Assistant's own developer documentation."""
         from app.sources import home_assistant
         states = [_make_entity("cover.garage_door", "open", device_class="garage", friendly_name="Garage Door")]
-        with patch("app.sources.home_assistant.requests.get", return_value=self._mock_states(states)):
+        with patch("app.sources.home_assistant._session.get", return_value=self._mock_states(states)):
             result = home_assistant.search("is the garage door open")
         assert "**Garage Doors:**" in result
         assert "Garage Door: open" in result
@@ -1135,7 +1135,7 @@ class TestGarageDoorSupport:
         capability typically uses."""
         from app.sources import home_assistant
         states = [_make_entity("binary_sensor.garage_door", "on", device_class="garage_door", friendly_name="Garage Door")]
-        with patch("app.sources.home_assistant.requests.get", return_value=self._mock_states(states)):
+        with patch("app.sources.home_assistant._session.get", return_value=self._mock_states(states)):
             result = home_assistant.search("garage door status")
         assert "Garage Door: on" in result
 
@@ -1150,7 +1150,7 @@ class TestGarageDoorSupport:
             _make_entity("cover.garage_door", "closed", device_class="garage", friendly_name="Garage Door"),
             _make_entity("lock.front_door", "locked", friendly_name="Front Door"),
         ]
-        with patch("app.sources.home_assistant.requests.get", return_value=self._mock_states(states)):
+        with patch("app.sources.home_assistant._session.get", return_value=self._mock_states(states)):
             result = home_assistant.search("the garage door is open")
         assert "Garage Door" in result
         assert "Front Door" not in result
@@ -1165,7 +1165,7 @@ class TestGarageDoorSupport:
             _make_entity("cover.garage_door", "closed", device_class="garage", friendly_name="Garage Door"),
             _make_entity("lock.front_door", "locked", friendly_name="Front Door"),
         ]
-        with patch("app.sources.home_assistant.requests.get", return_value=self._mock_states(states)):
+        with patch("app.sources.home_assistant._session.get", return_value=self._mock_states(states)):
             result = home_assistant.search("are the doors locked")
         assert "Front Door" in result
         assert "Garage Door" not in result

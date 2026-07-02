@@ -84,7 +84,7 @@ class TestForecastSearch:
 
     def test_returns_today_tomorrow_and_day3(self):
         from app.sources import forecast
-        with patch("app.sources.forecast.requests.get", return_value=_mock_forecast_response()):
+        with patch("app.sources.forecast._session.get", return_value=_mock_forecast_response()):
             result = forecast.search("weather")
         assert "Today" in result
         assert "Tomorrow" in result
@@ -93,39 +93,39 @@ class TestForecastSearch:
 
     def test_includes_high_and_low_temps(self):
         from app.sources import forecast
-        with patch("app.sources.forecast.requests.get", return_value=_mock_forecast_response()):
+        with patch("app.sources.forecast._session.get", return_value=_mock_forecast_response()):
             result = forecast.search("weather")
         assert "101" in result
         assert "77" in result
 
     def test_precipitation_included_when_20_or_above(self):
         from app.sources import forecast
-        with patch("app.sources.forecast.requests.get", return_value=_mock_forecast_response(precip=(25, 0, 0))):
+        with patch("app.sources.forecast._session.get", return_value=_mock_forecast_response(precip=(25, 0, 0))):
             result = forecast.search("weather")
         assert "25%" in result
 
     def test_precipitation_omitted_when_below_20(self):
         from app.sources import forecast
-        with patch("app.sources.forecast.requests.get", return_value=_mock_forecast_response(precip=(10, 10, 10))):
+        with patch("app.sources.forecast._session.get", return_value=_mock_forecast_response(precip=(10, 10, 10))):
             result = forecast.search("weather")
         assert "10%" not in result
 
     def test_wind_included_when_15mph_or_above(self):
         from app.sources import forecast
-        with patch("app.sources.forecast.requests.get", return_value=_mock_forecast_response(wind_speeds=(20, 10, 10))):
+        with patch("app.sources.forecast._session.get", return_value=_mock_forecast_response(wind_speeds=(20, 10, 10))):
             result = forecast.search("weather")
         assert "20" in result
         assert "miles per hour" in result
 
     def test_wind_omitted_when_below_15mph(self):
         from app.sources import forecast
-        with patch("app.sources.forecast.requests.get", return_value=_mock_forecast_response(wind_speeds=(10, 10, 10))):
+        with patch("app.sources.forecast._session.get", return_value=_mock_forecast_response(wind_speeds=(10, 10, 10))):
             result = forecast.search("weather")
         assert "miles per hour" not in result
 
     def test_sunrise_and_sunset_in_today(self):
         from app.sources import forecast
-        with patch("app.sources.forecast.requests.get", return_value=_mock_forecast_response()):
+        with patch("app.sources.forecast._session.get", return_value=_mock_forecast_response()):
             result = forecast.search("weather")
         assert "Sunrise" in result or "sunrise" in result
         assert "Sunset" in result or "sunset" in result
@@ -133,7 +133,7 @@ class TestForecastSearch:
     def test_api_error_returns_error_message(self):
         from app.sources import forecast
         import requests
-        with patch("app.sources.forecast.requests.get", side_effect=requests.exceptions.ConnectionError("refused")):
+        with patch("app.sources.forecast._session.get", side_effect=requests.exceptions.ConnectionError("refused")):
             result = forecast.search("weather")
         assert "unable to retrieve" in result.lower() or "error" in result.lower()
 
@@ -152,7 +152,7 @@ class TestForecastSearch:
         # Only 2 days of weathercode data, simulating a real partial/
         # degraded API response despite a successful HTTP status.
         mock.json.return_value["daily"]["weathercode"] = [0, 2]
-        with patch("app.sources.forecast.requests.get", return_value=mock):
+        with patch("app.sources.forecast._session.get", return_value=mock):
             result = forecast.search("weather")
         assert "unable to retrieve" in result.lower()
 
@@ -164,19 +164,19 @@ class TestForecastSearch:
         from app.sources import forecast
         mock = _mock_forecast_response()
         del mock.json.return_value["daily"]["sunrise"]
-        with patch("app.sources.forecast.requests.get", return_value=mock):
+        with patch("app.sources.forecast._session.get", return_value=mock):
             result = forecast.search("weather")
         assert "unable to retrieve" in result.lower()
 
     def test_clear_weather_described(self):
         from app.sources import forecast
-        with patch("app.sources.forecast.requests.get", return_value=_mock_forecast_response(codes=(0, 0, 0))):
+        with patch("app.sources.forecast._session.get", return_value=_mock_forecast_response(codes=(0, 0, 0))):
             result = forecast.search("weather")
         assert "clear" in result.lower()
 
     def test_rain_weather_described(self):
         from app.sources import forecast
-        with patch("app.sources.forecast.requests.get", return_value=_mock_forecast_response(codes=(63, 63, 63))):
+        with patch("app.sources.forecast._session.get", return_value=_mock_forecast_response(codes=(63, 63, 63))):
             result = forecast.search("weather")
         assert "rain" in result.lower()
 
@@ -219,7 +219,7 @@ class TestLocationNamePrefix:
             }
         }
         mock_resp.raise_for_status.return_value = None
-        with patch("app.sources.forecast.requests.get", return_value=mock_resp):
+        with patch("app.sources.forecast._session.get", return_value=mock_resp):
             result = forecast.search("weather")
         assert "Kingman, Arizona" in result
 
@@ -244,7 +244,7 @@ class TestLocationNamePrefix:
             }
         }
         mock_resp.raise_for_status.return_value = None
-        with patch("app.sources.forecast.requests.get", return_value=mock_resp):
+        with patch("app.sources.forecast._session.get", return_value=mock_resp):
             result = forecast.search("weather")
         assert result.startswith("Today will be")
 
@@ -293,7 +293,7 @@ class TestConfigurableThresholds:
         from app.config import settings
         from unittest.mock import patch
         settings.forecast_precip_threshold_pct = 50
-        with patch("app.sources.forecast.requests.get", return_value=self._mock_resp(precip=30)):
+        with patch("app.sources.forecast._session.get", return_value=self._mock_resp(precip=30)):
             result = forecast.search("weather")
         assert "precipitation" not in result.lower()
 
@@ -302,7 +302,7 @@ class TestConfigurableThresholds:
         from app.config import settings
         from unittest.mock import patch
         settings.forecast_precip_threshold_pct = 5
-        with patch("app.sources.forecast.requests.get", return_value=self._mock_resp(precip=10)):
+        with patch("app.sources.forecast._session.get", return_value=self._mock_resp(precip=10)):
             result = forecast.search("weather")
         assert "precipitation" in result.lower()
 
@@ -311,7 +311,7 @@ class TestConfigurableThresholds:
         from app.config import settings
         from unittest.mock import patch
         settings.forecast_wind_threshold_mph = 50
-        with patch("app.sources.forecast.requests.get", return_value=self._mock_resp(wind=20)):
+        with patch("app.sources.forecast._session.get", return_value=self._mock_resp(wind=20)):
             result = forecast.search("weather")
         assert "winds" not in result.lower()
 
@@ -320,7 +320,7 @@ class TestConfigurableThresholds:
         from app.config import settings
         from unittest.mock import patch
         settings.forecast_wind_threshold_mph = 5
-        with patch("app.sources.forecast.requests.get", return_value=self._mock_resp(wind=10)):
+        with patch("app.sources.forecast._session.get", return_value=self._mock_resp(wind=10)):
             result = forecast.search("weather")
         assert "winds" in result.lower()
 

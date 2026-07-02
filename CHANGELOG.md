@@ -4,6 +4,59 @@ All notable changes to Mnemolis are documented here, from v3.45.0 onward. For ev
 
 ---
 
+## [3.52.0]
+
+### Fixed — The Kiwix "Wikipedia Bonus" Never Actually Existed
+
+A second full-codebase review pass (external, function-by-function, against the v3.51.1 tarball) found one confirmed scoring bug: `_score_result()`'s docstring has always documented a standalone Wikipedia bonus (+8 definitional / +3 otherwise) plus a −10 list-article penalty — but in the code, the +8/+3 was nested *inside* the list-penalty branch with no `"wikipedia" in book` condition at all. Two confirmed consequences: (1) Wikipedia results never received any bonus — on an identical-title definitional query, the only differentiator was the +2 primary-book bonus, so whenever the LLM picked a non-Wikipedia primary book, a Stack Exchange result genuinely beat the Wikipedia one (measured 32 vs 30); (2) list articles in *any* book had their −10 penalty silently softened to −2/−7 — which the "nets −2 or −7 after its own partial offset" comment in `search()`, and the wiki's own Kiwix Scoring page, had each rationalized as intentional. The two pre-existing Wikipedia-bonus tests passed the entire time, but only via the primary-book bonus (both used Wikipedia as primary). Fixed to match the documentation that was right all along; two new regression tests pin each half in a way that fails against the old code. `wiki/Kiwix-Scoring.md` corrected — the earlier version of that page had the story exactly backwards.
+
+### Fixed — `/backup` Silently Lost Un-Checkpointed WAL Writes
+
+Every Mnemolis database runs in WAL mode, so recently committed writes live in the `-wal` sidecar until checkpoint — and `/backup` tarred only the bare `.db` file. Backups were missing every un-checkpointed write, and a copy taken mid-commit could be internally inconsistent. Each `.db` is now snapshotted via SQLite's online backup API (`Connection.backup()` — complete, consistent, safe under concurrent writers) into a temp file before tarring, with a logged raw-copy fallback for a genuinely corrupted database. The new regression test constructs the exact hazard (WAL mode, autocheckpoint off, writer connection held open across the endpoint call) and fails against the old behavior with `no such table`.
+
+### Fixed — `detect_conditional()`'s Remainder Split Had No Proper-Noun-Pair Guard
+
+`_decompose()` has always refused to split at a conjunction joining a bare proper-noun pair, but the conditional remainder split never applied the same guard: "if the front door is unlocked, tell me the latest on Iran and Israel" cleaved "Israel" off as a supposedly separate intent and mangled the consequence to "tell me the latest on Iran". Now judged per-occurrence via the same `_is_proper_noun_pair_at()` helper — a protected pair early in the consequence doesn't block a genuine separate intent behind a later conjunction. 2 new tests.
+
+### Changed — `/search` No Longer Pays a Wasted LLM Call, and Reports What Actually Happened
+
+`/search` previously called `detect_intent()` on the full query *before* routing, purely to compute the `cached` flag — a full, wasted cold LLM routing call for any query the router decomposes or treats as conditional (those paths never route the full query), plus a `cached` flag computed against a cache key those paths never use. Fallback detection was likewise inferred after the fact by comparing pre-computed intent against the resolved source — structurally blind to fallbacks inside decomposed sub-queries, as its own comment admitted.
+
+Replaced with `route_query()`, a new entry point that installs a per-request ContextVar stats channel (`_ROUTE_STATS` — the same pattern as `suppress_cache_writes()`) around `route_with_source()`. Cache hits, real handler/fusion invocations, fallbacks, and the intended source are each recorded at the exact code point where they genuinely happen, from any recursion depth or worker thread (every recorded value is an idempotent boolean set or plain overwrite, never a counter, so concurrent worker writes can't race into a wrong value). `route_with_source()`'s own recursion-laden 2-tuple signature — the original, still-valid reason the inference approach was chosen — stays completely unchanged; callers that never install the channel see zero behavior change. `cached` is now true only when the response was served entirely from cache; `fallback_occurred` now counts decomposed-sub-query fallbacks (they contribute to `fallback_count` but not the per-target breakdown, which matches rows by `source_used`); failures report the source the query was headed to when it broke, at whatever recursion depth. 13 new tests across router and main. `wiki/The-Fallback-Observability-Gap.md` gained a postscript; `wiki/Health-and-Observability.md` updated.
+
+### Changed — Decomposed Sub-Queries Resolve Concurrently
+
+The decomposition loop routed sub-queries strictly sequentially — a 3-intent cold compound query paid three stacked LLM-routing + source-fetch costs back to back, the largest remaining sequential-work latency cost after the searxng and conditional condition/remainder parallelizations of the same shape. Sub-queries (independent by construction) now dispatch onto a fresh, per-call executor bounded by `min(len(sub_queries), DECOMPOSE_MAX_PARALLEL)` (new setting, default 4) with `contextvars.copy_context()` per task, futures collected strictly in submission order so response sections follow ask order, never completion order. Per-call rather than a shared pool is deliberate: these workers recurse into `route_with_source()`, which can reach this same code path again, and a shared pool submitting into itself and blocking is a real deadlock under saturation — a fresh pool per nesting level cannot deadlock, and decomposed queries are rare enough that per-call construction isn't fusion's unbounded-thread-pressure pattern (the same judgment already made for `_resolve_conditional()`'s per-call executor). The loop body was extracted to `_resolve_decomposed_sub_query()`. 4 new tests, including a timing test confirmed to fail against the sequential implementation, an ask-order test with the slow sub-query deliberately first, and a `suppress_cache_writes()` propagation test.
+
+### Changed — Routing Cache Writes Are Now Batched, Both Caches Flush on Clean Shutdown
+
+`_set_routing()` called `_save_routing_cache()` on every single write — a full JSON dump of up to 1000 entries per routing decision, from four separate writers, clustering exactly during cold bursts, on request-serving threads. Now batched every 5 writes (`_ROUTING_CACHE_SAVE_INTERVAL`), the identical batching the result cache always had. To cover the durability tradeoff, new `router.flush_caches()` runs in the lifespan shutdown: a clean `docker stop` persists everything, so only a hard crash can lose the up-to-4 unflushed entries — each just a re-derivable LLM decision. `_atomic_write_json()` also now fsyncs before the atomic rename, closing the crash-durability gap (a power cut shortly after rename could previously leave a zero-length file on filesystems that commit the rename before the data blocks) — affordable now precisely because saves are batched. `wiki/Caching.md` corrected: it had described the per-write asymmetry as intentional.
+
+### Changed — FreshRSS Token Caching With 401 Self-Healing
+
+Every news query paid a full ClientLogin round trip despite GReader tokens being long-lived by design — the same class of per-call-connection-setup cost already fixed twice (uptime_kuma's Socket.IO login, llm.py's TCP connections), one layer up the stack. The token is now cached module-level; a 401 from the articles request triggers exactly one re-auth and retry, so a stale token (API password change, FreshRSS reinstall) costs one extra request, never a wrong answer, never a retry loop. 8 new tests including the single-retry bound and failed-refresh-clears-stale-token.
+
+### Changed — Persistent HTTP Sessions for Every Source Module
+
+`searxng`, `kiwix`, `home_assistant`, `freshrss`, and `forecast` all used bare `requests.get()`/`post()` — a fresh TCP setup and teardown per call with zero reuse, the identical pattern `llm.py` fixed for its own cross-machine backend. Each module now has a module-level `requests.Session` (never mutated after creation — the same thread-safety analysis `llm.py` documents). Kiwix benefits most (catalog fetch + per-book searches + article fetch per query); Open-Meteo is the one external-internet dependency where skipping the TLS handshake matters most. `snapshot_ha()` also now reuses `home_assistant._get_states()` instead of carrying its own line-for-line duplicate of the same fetch — one less drift-prone copy, and the snapshot job rides the same session.
+
+### Fixed — SQLite Connections Leaked on Exception Paths
+
+~25 call sites across `main.py`, `router.py`, `snapshots.py`, `adversarial_testing.py`, and `temporal_patterns.py` closed their connection only on the success path — any mid-function sqlite error was caught and handled, but the just-opened connection lingered until GC. Short blocks now use `contextlib.closing()`; the handful of long-bodied functions use `con = None` + `finally`. `get_snapshot_job_health()` additionally consolidated four connections-plus-queries (one per source, per `/health` call) into one `GROUP BY` query — a case where SQLite's bare-column guarantee genuinely applies (single `MAX()` aggregate), the inverse of the `query_log_stats()` case where it didn't. `uptime_kuma.search()`'s error path similarly discarded a possibly half-alive connection with a bare `_persistent_api = None`; it now routes through `disconnect()` so the transport closes at the moment the object is discarded. 1 new test.
+
+### Changed — Micro-Optimizations and Cleanups
+
+- `_looks_empty()`'s 20-phrase list and kiwix's definitional-pattern list hoisted to module-level tuples (both rebuilt per call on hot paths); `_COLLOQUIAL_PHRASES` hoisted out of `_decompose()`'s body.
+- `_is_definitional_query()`'s redundant `q.startswith(p) or p in q` reduced to `p in q` (a prefix match is by definition a substring match).
+- Kiwix `search()` now decorate-sorts once — `_score_result()` was recomputed for the same result up to three times (sort key, `top`, per-book fusion loop); pure function, so identical outcome, strictly less work.
+- `_interpret_binary_state()`'s `callable` annotations corrected to `typing.Callable[[str], bool]`.
+- Redundant local `import re` removed from `_resolve_changes_hours()` (already imported at module top).
+
+### Changed
+- Version bumped to 3.52.0. Test suite: 1401 passing (from 1376 at v3.51.1), ruff clean. README test count updated; `wiki/Query-Decomposition.md`, `wiki/Conditional-Query-Detection.md`, `wiki/Sources.md`, `wiki/Backup-and-Restore.md`, and `wiki/Configuration-Reference.md` updated for the new behaviors and the `DECOMPOSE_MAX_PARALLEL` setting.
+
+---
+
 ## [3.51.1]
 
 ### Fixed — MCP `search` Tool Now Correctly Sets `isError=True` on Genuine Failures

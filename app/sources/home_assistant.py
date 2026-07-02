@@ -18,6 +18,16 @@ from app.config import settings
 
 _LOGGER = logging.getLogger(__name__)
 
+# Persistent HTTP session — connection reuse across every Home Assistant
+# call, the same shape as app/llm.py's fix and searxng.py's _session
+# (see searxng.py's comment for the shared thread-safety rationale:
+# never mutated after creation, only ever `.get()`/`.post()`). HA is
+# hit by direct queries, fusion, snapshots (snapshot_ha() reuses
+# _get_states() and therefore this same session), and the wall
+# dashboard's habits — steady enough traffic that per-call TCP setup
+# was pure recurring waste.
+_session = requests.Session()
+
 # Entity IDs to always exclude — internal HA entities, unavailable sensors, segments
 _EXCLUDE_PATTERNS = [
     "light.backyard_light_2",  # duplicate sub-entity
@@ -137,7 +147,7 @@ def _get_states() -> list[dict] | None:
     if not settings.ha_url or not settings.ha_token:
         return None
     try:
-        resp = requests.get(
+        resp = _session.get(
             f"{settings.ha_url}/api/states",
             headers={"Authorization": f"Bearer {settings.ha_token}"},
             timeout=10,
@@ -157,7 +167,7 @@ def _get_area_entities() -> dict[str, list[str]] | None:
         return None
     try:
         template = "{% for area in areas() %}{{ area }}|||{{ area_entities(area) | join(',') }}\n{% endfor %}"
-        resp = requests.post(
+        resp = _session.post(
             f"{settings.ha_url}/api/template",
             headers={
                 "Authorization": f"Bearer {settings.ha_token}",

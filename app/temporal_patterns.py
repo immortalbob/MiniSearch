@@ -45,6 +45,7 @@ the full reasoning on why this scope line was drawn where it was.
 import logging
 import math
 import sqlite3
+from contextlib import closing
 from datetime import datetime, timezone, timedelta
 
 from app.config import settings
@@ -79,78 +80,77 @@ def init_temporal_patterns_db():
     don't exist. Mirrors snapshots.init_snapshot_db() / adversarial_
     testing.init_adversarial_db()'s exact pattern."""
     try:
-        con = _connect(TEMPORAL_PATTERNS_DB)
-        con.execute("""
-            CREATE TABLE IF NOT EXISTS temporal_events (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                source TEXT NOT NULL,
-                event_type TEXT NOT NULL,
-                timestamp TEXT NOT NULL,
-                raw_detail TEXT
-            )
-        """)
-        con.execute("""
-            CREATE INDEX IF NOT EXISTS idx_temporal_events_type_time
-                ON temporal_events (event_type, timestamp)
-        """)
+        with closing(_connect(TEMPORAL_PATTERNS_DB)) as con:
+            con.execute("""
+                CREATE TABLE IF NOT EXISTS temporal_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    source TEXT NOT NULL,
+                    event_type TEXT NOT NULL,
+                    timestamp TEXT NOT NULL,
+                    raw_detail TEXT
+                )
+            """)
+            con.execute("""
+                CREATE INDEX IF NOT EXISTS idx_temporal_events_type_time
+                    ON temporal_events (event_type, timestamp)
+            """)
 
-        # Patterns table — one row per (event_type_a, event_type_b,
-        # lag_bucket_minutes) combination ever found as a candidate.
-        # Status transitions: candidate -> confirmed (passed out-of-
-        # sample re-check) or candidate -> unconfirmed (failed it).
-        # History is never deleted on a failed re-check, the same
-        # "status changes, rows don't disappear" philosophy already
-        # established for adversarial self-testing's dismiss mechanism
-        # — an honestly-reported "didn't replicate" is real, useful
-        # information, not noise to clean up.
-        con.execute("""
-            CREATE TABLE IF NOT EXISTS temporal_patterns (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                event_type_a TEXT NOT NULL,
-                event_type_b TEXT NOT NULL,
-                lag_window_minutes INTEGER NOT NULL,
-                status TEXT NOT NULL,
-                raw_count INTEGER NOT NULL,
-                expected_count_null REAL NOT NULL,
-                p_value REAL NOT NULL,
-                corrected_threshold REAL NOT NULL,
-                num_comparisons_in_pass INTEGER NOT NULL,
-                discovery_window_start TEXT NOT NULL,
-                discovery_window_end TEXT NOT NULL,
-                validation_window_start TEXT,
-                validation_window_end TEXT,
-                validation_raw_count INTEGER,
-                first_found_timestamp TEXT NOT NULL,
-                last_checked_timestamp TEXT NOT NULL,
-                UNIQUE(event_type_a, event_type_b, lag_window_minutes, discovery_window_start)
-            )
-        """)
-        con.execute("""
-            CREATE INDEX IF NOT EXISTS idx_temporal_patterns_status
-                ON temporal_patterns (status)
-        """)
+            # Patterns table — one row per (event_type_a, event_type_b,
+            # lag_bucket_minutes) combination ever found as a candidate.
+            # Status transitions: candidate -> confirmed (passed out-of-
+            # sample re-check) or candidate -> unconfirmed (failed it).
+            # History is never deleted on a failed re-check, the same
+            # "status changes, rows don't disappear" philosophy already
+            # established for adversarial self-testing's dismiss mechanism
+            # — an honestly-reported "didn't replicate" is real, useful
+            # information, not noise to clean up.
+            con.execute("""
+                CREATE TABLE IF NOT EXISTS temporal_patterns (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    event_type_a TEXT NOT NULL,
+                    event_type_b TEXT NOT NULL,
+                    lag_window_minutes INTEGER NOT NULL,
+                    status TEXT NOT NULL,
+                    raw_count INTEGER NOT NULL,
+                    expected_count_null REAL NOT NULL,
+                    p_value REAL NOT NULL,
+                    corrected_threshold REAL NOT NULL,
+                    num_comparisons_in_pass INTEGER NOT NULL,
+                    discovery_window_start TEXT NOT NULL,
+                    discovery_window_end TEXT NOT NULL,
+                    validation_window_start TEXT,
+                    validation_window_end TEXT,
+                    validation_raw_count INTEGER,
+                    first_found_timestamp TEXT NOT NULL,
+                    last_checked_timestamp TEXT NOT NULL,
+                    UNIQUE(event_type_a, event_type_b, lag_window_minutes, discovery_window_start)
+                )
+            """)
+            con.execute("""
+                CREATE INDEX IF NOT EXISTS idx_temporal_patterns_status
+                    ON temporal_patterns (status)
+            """)
 
-        # Tracks the mining cycle's own run history, separately from
-        # individual pattern rows, the same reason
-        # get_snapshot_job_health() and get_adversarial_test_summary()
-        # both need their own "when did this job last actually run"
-        # signal distinct from the data it produced — a cycle that ran
-        # and genuinely found zero candidates needs a different status
-        # than a cycle that never ran at all, and neither is visible
-        # from the temporal_patterns table alone if a given run found
-        # nothing.
-        con.execute("""
-            CREATE TABLE IF NOT EXISTS temporal_mining_runs (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                run_timestamp TEXT NOT NULL,
-                events_considered INTEGER NOT NULL,
-                comparisons_run INTEGER NOT NULL,
-                candidates_found INTEGER NOT NULL
-            )
-        """)
+            # Tracks the mining cycle's own run history, separately from
+            # individual pattern rows, the same reason
+            # get_snapshot_job_health() and get_adversarial_test_summary()
+            # both need their own "when did this job last actually run"
+            # signal distinct from the data it produced — a cycle that ran
+            # and genuinely found zero candidates needs a different status
+            # than a cycle that never ran at all, and neither is visible
+            # from the temporal_patterns table alone if a given run found
+            # nothing.
+            con.execute("""
+                CREATE TABLE IF NOT EXISTS temporal_mining_runs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    run_timestamp TEXT NOT NULL,
+                    events_considered INTEGER NOT NULL,
+                    comparisons_run INTEGER NOT NULL,
+                    candidates_found INTEGER NOT NULL
+                )
+            """)
 
-        con.commit()
-        con.close()
+            con.commit()
         _LOGGER.info("Temporal patterns DB initialized")
     except Exception as e:
         _LOGGER.warning("Could not initialize temporal patterns DB: %s", e)
@@ -163,13 +163,12 @@ def _store_event(source: str, event_type: str, timestamp: str, raw_detail: str =
     should log and move on, not take down the calling extraction loop
     or, worse, the scheduler itself."""
     try:
-        con = _connect(TEMPORAL_PATTERNS_DB)
-        con.execute(
-            "INSERT INTO temporal_events (source, event_type, timestamp, raw_detail) VALUES (?, ?, ?, ?)",
-            (source, event_type, timestamp, raw_detail),
-        )
-        con.commit()
-        con.close()
+        with closing(_connect(TEMPORAL_PATTERNS_DB)) as con:
+            con.execute(
+                "INSERT INTO temporal_events (source, event_type, timestamp, raw_detail) VALUES (?, ?, ?, ?)",
+                (source, event_type, timestamp, raw_detail),
+            )
+            con.commit()
     except Exception as e:
         _LOGGER.warning("Could not store temporal event '%s' for '%s': %s", event_type, source, e)
 
@@ -361,15 +360,14 @@ def _dedupe_events_table():
     than preventing it up front.
     """
     try:
-        con = _connect(TEMPORAL_PATTERNS_DB)
-        con.execute("""
-            DELETE FROM temporal_events WHERE id NOT IN (
-                SELECT MIN(id) FROM temporal_events
-                GROUP BY source, event_type, timestamp, raw_detail
-            )
-        """)
-        con.commit()
-        con.close()
+        with closing(_connect(TEMPORAL_PATTERNS_DB)) as con:
+            con.execute("""
+                DELETE FROM temporal_events WHERE id NOT IN (
+                    SELECT MIN(id) FROM temporal_events
+                    GROUP BY source, event_type, timestamp, raw_detail
+                )
+            """)
+            con.commit()
     except Exception as e:
         _LOGGER.warning("Could not dedupe temporal_events: %s", e)
 
@@ -614,9 +612,14 @@ def run_temporal_pattern_mining_cycle() -> dict:
             (_fmt_ts(now), len(events), num_comparisons, candidates_found),
         )
         con.commit()
-        con.close()
     except Exception as e:
         _LOGGER.warning("Temporal pattern mining: could not record run summary: %s", e)
+    finally:
+        # Guaranteed close even when the summary INSERT raises — the
+        # previous inline con.close() on the success path leaked the
+        # connection whenever recording the run summary failed. See
+        # query_log_stats() in main.py for the pass-wide rationale.
+        con.close()
 
     _LOGGER.info(
         "Temporal pattern mining cycle complete: %d events, %d comparisons, %d candidates found",
@@ -756,19 +759,18 @@ def get_temporal_patterns(status: str | None = None, limit: int = 100) -> list[d
     just in documentation a person might not read.
     """
     try:
-        con = _connect(TEMPORAL_PATTERNS_DB)
-        if status:
-            rows = con.execute(
-                "SELECT * FROM temporal_patterns WHERE status = ? ORDER BY first_found_timestamp DESC LIMIT ?",
-                (status, limit),
-            ).fetchall()
-        else:
-            rows = con.execute(
-                "SELECT * FROM temporal_patterns ORDER BY first_found_timestamp DESC LIMIT ?",
-                (limit,),
-            ).fetchall()
-        columns = [d[0] for d in con.execute("SELECT * FROM temporal_patterns LIMIT 0").description]
-        con.close()
+        with closing(_connect(TEMPORAL_PATTERNS_DB)) as con:
+            if status:
+                rows = con.execute(
+                    "SELECT * FROM temporal_patterns WHERE status = ? ORDER BY first_found_timestamp DESC LIMIT ?",
+                    (status, limit),
+                ).fetchall()
+            else:
+                rows = con.execute(
+                    "SELECT * FROM temporal_patterns ORDER BY first_found_timestamp DESC LIMIT ?",
+                    (limit,),
+                ).fetchall()
+            columns = [d[0] for d in con.execute("SELECT * FROM temporal_patterns LIMIT 0").description]
     except Exception as e:
         _LOGGER.warning("Could not fetch temporal patterns: %s", e)
         return []
@@ -808,23 +810,22 @@ def get_temporal_pattern_summary() -> dict:
         return {"status": "disabled"}
 
     try:
-        con = _connect(TEMPORAL_PATTERNS_DB)
-        last_run_row = con.execute(
-            "SELECT run_timestamp, events_considered FROM temporal_mining_runs ORDER BY id DESC LIMIT 1"
-        ).fetchone()
-        total_candidates = con.execute(
-            "SELECT COUNT(*) FROM temporal_patterns"
-        ).fetchone()[0]
-        confirmed = con.execute(
-            "SELECT COUNT(*) FROM temporal_patterns WHERE status = 'confirmed'"
-        ).fetchone()[0]
-        unconfirmed = con.execute(
-            "SELECT COUNT(*) FROM temporal_patterns WHERE status = 'unconfirmed'"
-        ).fetchone()[0]
-        pending_candidates = con.execute(
-            "SELECT COUNT(*) FROM temporal_patterns WHERE status = 'candidate'"
-        ).fetchone()[0]
-        con.close()
+        with closing(_connect(TEMPORAL_PATTERNS_DB)) as con:
+            last_run_row = con.execute(
+                "SELECT run_timestamp, events_considered FROM temporal_mining_runs ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+            total_candidates = con.execute(
+                "SELECT COUNT(*) FROM temporal_patterns"
+            ).fetchone()[0]
+            confirmed = con.execute(
+                "SELECT COUNT(*) FROM temporal_patterns WHERE status = 'confirmed'"
+            ).fetchone()[0]
+            unconfirmed = con.execute(
+                "SELECT COUNT(*) FROM temporal_patterns WHERE status = 'unconfirmed'"
+            ).fetchone()[0]
+            pending_candidates = con.execute(
+                "SELECT COUNT(*) FROM temporal_patterns WHERE status = 'candidate'"
+            ).fetchone()[0]
     except Exception as e:
         return {"status": "unknown", "error": str(e)}
 

@@ -8,7 +8,8 @@ import threading
 import contextvars
 import tempfile
 import concurrent.futures
-from contextlib import contextmanager
+from contextlib import contextmanager, closing
+from typing import Callable, NamedTuple
 from app.sources import kiwix, forecast, freshrss, searxng, uptime_kuma, fusion, home_assistant
 from app.snapshots import get_changes, format_changes
 from app.config import settings
@@ -116,12 +117,16 @@ def get_recent_queries(limit: int = 20) -> list[tuple[str, str]]:
     one-size-fits-all query_log reader for every future feature.
     """
     try:
-        con = _connect_log_db_readonly()
-        rows = con.execute(
-            "SELECT query, timestamp FROM query_log ORDER BY id DESC LIMIT ?",
-            (limit,),
-        ).fetchall()
-        con.close()
+        # closing() guarantees the connection is released even when the
+        # SELECT itself raises — previously the except below caught the
+        # error and returned [], but the just-opened connection was
+        # never closed and lingered until GC. Same fix applied across
+        # every _connect() call site in this pass.
+        with closing(_connect_log_db_readonly()) as con:
+            rows = con.execute(
+                "SELECT query, timestamp FROM query_log ORDER BY id DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
         return [(r[0], r[1]) for r in rows]
     except sqlite3.Error as e:
         _LOGGER.debug("Could not read recent queries from query_log.db (likely none logged yet): %s", e)
@@ -591,6 +596,25 @@ def _atomic_write_json(filepath: str, data: dict) -> None:
     try:
         with os.fdopen(fd, "w") as f:
             json.dump(data, f)
+            # fsync BEFORE the replace — without it, os.replace() gives
+            # crash-CONSISTENCY (the path always names a complete old or
+            # complete new file with respect to concurrent writers) but
+            # not crash-DURABILITY: on a power loss shortly after the
+            # rename, some filesystems can commit the rename before the
+            # temp file's data blocks reach disk, leaving the path
+            # pointing at a truncated or empty file. Flushing Python's
+            # buffer and fsyncing the file descriptor first guarantees
+            # the bytes are on disk before the rename can make them the
+            # canonical copy. The cost — one synchronous disk flush —
+            # was material back when the routing cache wrote its entire
+            # file on every single routing decision, but both caches now
+            # batch their saves (every _CACHE_SAVE_INTERVAL /
+            # _ROUTING_CACHE_SAVE_INTERVAL writes), so this fires a
+            # handful of times a minute at most, on background-ish
+            # paths, in exchange for backups and restarts never finding
+            # a zero-length cache file after an unlucky power cut.
+            f.flush()
+            os.fsync(f.fileno())
         os.replace(tmp_path, filepath)
     except Exception:
         # Clean up the temp file on any failure — os.replace() never
@@ -845,6 +869,7 @@ def _get_cached(source: str, query: str) -> str | None:
         ttl = CACHE_TTL.get(source, 3600)
         if time.time() - timestamp < ttl:
             _LOGGER.info("Cache hit for source='%s' query='%s'", source, query[:50])
+            _route_stat("served_any_from_cache", True)
             return result
         else:
             del _cache[key]
@@ -1425,6 +1450,24 @@ _CONJUNCTIONS = [" and ", " also ", " plus ", " as well as ", " in addition "]
 
 # Phrases that look like conjunctions but shouldn't split
 # e.g. "Python and Rust", "Phoenix and Kingman", "cats and dogs"
+# Colloquial question phrases — "what's the deal with X", "what's up
+# with X" are real standalone intents regardless of what specific noun
+# follows, so a sub-query containing one of these anywhere should
+# always count as meaningful even if the trailing noun isn't itself
+# recognized as a content word. Matched as a substring anywhere in the
+# clause, not just at position zero — "and remind me what's up with X"
+# has the marker mid-clause, since the clause itself still carries the
+# leftover conjunction/filler word ("and remind me...") from wherever
+# the split actually occurred. Module-level (hoisted out of
+# _decompose()'s body, where it was rebuilt on every call — _decompose()
+# runs on every auto-routed query) and a tuple: immutable module state.
+_COLLOQUIAL_PHRASES = (
+    "what's the deal with", "whats the deal with",
+    "what's up with", "whats up with",
+    "what's this about", "whats this about",
+    "what's the story with", "whats the story with",
+)
+
 _NOSPLIT_PATTERNS = [
     "compare", "difference between", "vs", "versus",
     "both", "either", "neither", "between",
@@ -1494,10 +1537,31 @@ def detect_conditional(query: str) -> tuple[str, str, str] | None:
     # unicode, empty-string, and emoji edge cases) — if the substring
     # is genuinely present, `.find()` is logically guaranteed to return
     # a real, non-negative index, never -1.
-    cut_points = [
-        consequence_lower.find(conj) for conj in _CONJUNCTIONS
-        if conj in consequence_lower
-    ]
+    #
+    # Per-occurrence proper-noun-pair protection, mirroring _decompose():
+    # found via a deliberate function-by-function audit — _decompose()
+    # has always refused to split at a conjunction joining a bare
+    # proper-noun pair ("Iran and Israel"), but this remainder split
+    # never applied the same guard, so "if the front door is unlocked,
+    # tell me the latest on Iran and Israel" cleaved "Israel" off as a
+    # supposedly separate intent and mangled the consequence to "tell me
+    # the latest on Iran". Only the FIRST non-protected occurrence
+    # matters (min() below), and each occurrence is judged individually
+    # via the same _is_proper_noun_pair_at() helper _decompose() uses —
+    # a protected pair early in the consequence must not block a genuine
+    # separate intent later ("...on Iran and Israel, and also the
+    # weather" still splits at the second conjunction).
+    cut_points = []
+    for conj in _CONJUNCTIONS:
+        search_from = 0
+        while True:
+            idx = consequence_lower.find(conj, search_from)
+            if idx == -1:
+                break
+            if not _is_proper_noun_pair_at(consequence, idx, len(conj)):
+                cut_points.append(idx)
+                break  # only the earliest non-protected occurrence of this conj matters
+            search_from = idx + len(conj)
     remainder = ""
     if cut_points:
         cut = min(cut_points)
@@ -1530,8 +1594,8 @@ def _interpret_binary_state(
     result_lower: str,
     negative_condition_keywords: list[str],
     positive_condition_keywords: list[str],
-    confirms_negative_result: callable,
-    confirms_positive_result: callable,
+    confirms_negative_result: Callable[[str], bool],
+    confirms_positive_result: Callable[[str], bool],
 ) -> bool | None:
     """
     Shared logic for interpreting a structured source's result against
@@ -1802,22 +1866,6 @@ def _decompose(query: str) -> list[str]:
     if any(p in q_lower for p in _NOSPLIT_PATTERNS):
         return [q]
 
-    # Colloquial question phrases — "what's the deal with X", "what's up
-    # with X" are real standalone intents regardless of what specific noun
-    # follows, so a sub-query containing one of these anywhere should
-    # always count as meaningful even if the trailing noun isn't itself
-    # recognized as a content word. Matched as a substring anywhere in the
-    # clause, not just at position zero — "and remind me what's up with X"
-    # has the marker mid-clause, since the clause itself still carries the
-    # leftover conjunction/filler word ("and remind me...") from wherever
-    # the split actually occurred.
-    _COLLOQUIAL_PHRASES = [
-        "what's the deal with", "whats the deal with",
-        "what's up with", "whats up with",
-        "what's this about", "whats this about",
-        "what's the story with", "whats the story with",
-    ]
-
     best_split: list[str] | None = None
 
     def _filter_meaningful(parts: list[str]) -> list[str]:
@@ -2012,6 +2060,133 @@ def route(query: str, source: str = "auto", fusion_sources: list[str] | None = N
     return result
 
 
+# ---------------------------------------------------------------------------
+# Per-request route stats — how main.py's /search learns what really
+# happened inside route_with_source() without changing its signature
+# ---------------------------------------------------------------------------
+#
+# The problem this solves, confirmed via a deliberate function-by-function
+# audit: /search previously called detect_intent(request.query) BEFORE
+# route_with_source(), purely to compute the `cached` response field —
+# meaning (1) a query that route_with_source() would decompose or treat as
+# conditional paid a full, wasted cold LLM routing call for a full-query
+# intent decision the decomposition/conditional paths never even use, and
+# (2) the `cached` flag was computed against a single-source cache key
+# that doesn't correspond to what actually ran for those compound shapes.
+# Fallback detection had the same structural gap: main.py inferred it
+# after the fact by comparing its own pre-computed intent against the
+# resolved source — an inference its own comment documents as blind to
+# fallbacks inside decomposed sub-queries.
+#
+# Widening route_with_source()'s return tuple was considered and
+# deliberately rejected (again — the same call main.py's original
+# fallback-detection comment documents): that function recurses into
+# itself at 4 internal call sites and is unpacked as a 2-tuple across
+# dozens of tests; threading a third element through every one of those
+# is a much larger, riskier change than the information flow requires.
+#
+# Instead, the same ContextVar pattern this module already uses for
+# suppress_cache_writes(): route_query() (the one real /search entry
+# point) installs a small mutable stats dict in a ContextVar; the few
+# genuinely authoritative points deep in the call graph (_get_cached()
+# hits, real handler/fusion invocations, the fallback path inside
+# _resolve_single_source()) record into it via _route_stat(); everything
+# else — including every recursive call and every worker thread, since
+# contextvars.copy_context() copies the Context but shares the SAME dict
+# object by reference — sees and mutates the one shared dict. Every
+# recorded value is an idempotent boolean set or a plain overwrite, never
+# a read-modify-write counter, precisely so concurrent worker-thread
+# writes can never race each other into a wrong value. Callers that never
+# install the ContextVar (fusion's internal dispatch, the MCP server's
+# route(), adversarial testing, every existing test) leave it at its None
+# default and every _route_stat() call is a no-op — zero behavior change
+# for them.
+_ROUTE_STATS: contextvars.ContextVar[dict | None] = contextvars.ContextVar(
+    "_ROUTE_STATS", default=None
+)
+
+
+def _route_stat(key: str, value) -> None:
+    """Record one fact about the current route_query() call, if one is
+    in progress — a no-op for every caller that didn't come through
+    route_query(). Idempotent-set semantics only; see the module comment
+    above _ROUTE_STATS for why values are never incremented."""
+    stats = _ROUTE_STATS.get()
+    if stats is not None:
+        stats[key] = value
+
+
+class RouteOutcome(NamedTuple):
+    """Everything /search needs to know about one routed query —
+    returned by route_query() below."""
+    result: str
+    source_used: str
+    cached: bool
+    fallback_occurred: bool
+    success: bool
+    error: str | None
+
+
+def route_query(query: str, source: str = "auto", fusion_sources: list[str] | None = None) -> RouteOutcome:
+    """The /search entry point: run route_with_source() with a per-request
+    stats channel installed, and return the result together with what
+    genuinely happened — whether the response was served entirely from
+    cache, whether any FALLBACK_CHAIN fallback actually fired (including
+    inside decomposed sub-queries, which main.py's old after-the-fact
+    inference structurally could not see), and, on failure, the source
+    the query was headed to when it broke.
+
+    `cached` is True only when the response was served ENTIRELY from the
+    result cache — at least one cache hit and zero real handler/fusion
+    invocations. For a plain single-source query this is exactly the old
+    pre-check semantics; for a decomposed query it's strictly more
+    honest than the old behavior (which checked a cache key that never
+    corresponds to anything the decomposition path actually does).
+
+    Never raises: an unexpected exception from routing is caught here
+    and reported as success=False with the intended source preserved
+    from whatever intent resolution had already happened — the same
+    honest "what was this query trying to do" reporting main.py's own
+    error path previously reconstructed from its pre-computed intent.
+    """
+    stats: dict = {
+        "served_any_from_cache": False,
+        "invoked_any_source": False,
+        "fallback_occurred": False,
+        "intended_source": None,
+    }
+    token = _ROUTE_STATS.set(stats)
+    try:
+        result, source_used = route_with_source(query, source, fusion_sources)
+        cached = stats["served_any_from_cache"] and not stats["invoked_any_source"]
+        return RouteOutcome(
+            result=result,
+            source_used=source_used,
+            cached=cached,
+            fallback_occurred=stats["fallback_occurred"],
+            success=True,
+            error=None,
+        )
+    except Exception as e:
+        # Report the source this query was actually headed to when it
+        # broke — recorded by route_with_source()'s own intent
+        # resolution — rather than echoing back the literal string
+        # "auto", which is a non-answer. Falls back to the requested
+        # source only when the exception fired before any intent was
+        # ever resolved.
+        failure_source = stats["intended_source"] or source
+        return RouteOutcome(
+            result="",
+            source_used=failure_source,
+            cached=False,
+            fallback_occurred=stats["fallback_occurred"],
+            success=False,
+            error=str(e),
+        )
+    finally:
+        _ROUTE_STATS.reset(token)
+
+
 def _resolve_single_source(source: str, query: str) -> tuple[str, str]:
     """
     Resolve a single (non-fusion) source for a query: check cache, call
@@ -2044,6 +2219,7 @@ def _resolve_single_source(source: str, query: str) -> tuple[str, str]:
     if cached:
         return cached, source
 
+    _route_stat("invoked_any_source", True)
     result = handler(query)
 
     if _looks_empty(result) and source in FALLBACK_CHAIN:
@@ -2053,10 +2229,18 @@ def _resolve_single_source(source: str, query: str) -> tuple[str, str]:
         if fallback_handler:
             cached_fallback = _get_cached(fallback_source, query)
             if cached_fallback:
+                _route_stat("fallback_occurred", True)
                 return cached_fallback, fallback_source
             fallback_result = fallback_handler(query)
             if not _looks_empty(fallback_result):
                 _LOGGER.info("Fallback to '%s' succeeded", fallback_source)
+                # Recorded HERE, at the one place a fallback genuinely
+                # happens, rather than inferred after the fact in
+                # main.py by comparing intended vs resolved source —
+                # that inference was structurally blind to fallbacks
+                # inside decomposed sub-queries (its own comment said
+                # so), which this direct recording now sees too.
+                _route_stat("fallback_occurred", True)
                 _set_cached(fallback_source, query, fallback_result)
                 return fallback_result, fallback_source
             _LOGGER.warning("Fallback to '%s' also returned empty result", fallback_source)
@@ -2369,6 +2553,95 @@ def _dedupe_nested_fusion_sections(text: str) -> str:
 
 
 
+def _resolve_decomposed_sub_query(sub_q: str) -> list[tuple[str, str]]:
+    """Resolve ONE decomposed sub-query into zero, one, or two
+    (source, result) parts — extracted from route_with_source()'s
+    decomposition loop so sub-queries can run concurrently (each call
+    is dispatched onto its own worker thread there). The earlier note
+    in _merge_decomposed_parts()'s docstring about this loop staying
+    inline predates the parallelization; the only loop state the body
+    ever actually needed was the parts it produced, which is exactly
+    this function's return value.
+
+    Each decomposed sub-query may itself contain a leading "if X, Y"
+    structure that the top-level conditional check never sees —
+    detect_conditional() only runs once, against the FULL original
+    query, before decomposition. A query like "what is the weather and
+    if the back door is unlocked, let me know" doesn't start with "if"
+    so the top-level check correctly returns None, but the second
+    decomposed sub-query ("if the back door is unlocked, let me know")
+    absolutely does match and was previously never re-checked at all.
+
+    Mirrors the top-level conditional handling exactly: extract the
+    condition and search ONLY that (via a recursive call on the
+    condition text, not the original "if X, Y" string), then frame the
+    response. An earlier version of this fix recursed on the original
+    sub_q string with a manual _depth counter meant to stop infinite
+    recursion — but that counter blocked the recursive call's OWN
+    necessary re-detection of the very same conditional it was meant
+    to handle, since the depth incremented before the conditional was
+    actually consumed. Passing the already-extracted condition (not
+    the still-"if"-prefixed sub_q) sidesteps the whole problem: the
+    condition text essentially never re-matches the leading
+    "if/should/in case" pattern, so this naturally terminates without
+    needing any artificial depth limit at all.
+    """
+    parts: list[tuple[str, str]] = []
+
+    sub_conditional = detect_conditional(sub_q)
+    if sub_conditional:
+        sub_condition, sub_consequence, sub_remainder = sub_conditional
+        sub_condition_result, sub_source = route_with_source(sub_condition, "auto")
+        sub_result = _frame_conditional_response(
+            sub_condition, sub_consequence, sub_condition_result, sub_source
+        )
+        if not _looks_empty(sub_condition_result):
+            parts.append((sub_source, sub_result))
+        # A real, separate intent followed the conditional within this
+        # one decomposed sub-query — search it independently too, rather
+        # than losing it or letting it pollute the consequence text
+        if sub_remainder:
+            remainder_result, remainder_source = route_with_source(sub_remainder, "auto")
+            if not _looks_empty(remainder_result):
+                parts.append((remainder_source, remainder_result))
+        return parts
+
+    intent = detect_intent(sub_q)
+    if isinstance(intent, list):
+        # Found via a deliberate complexity-reduction investigation
+        # (comparing this dispatch against the top-level single-query
+        # fusion dispatch, the same side-by-side-comparison discipline
+        # that found two real bugs during the prior extraction pass): a
+        # decomposed sub-query that itself resolves to fusion had NO
+        # caching at all, unlike every other path in the system — every
+        # individual single-source sub-query result gets cached via
+        # _resolve_single_source(), the overall merged decomposed
+        # response gets no cache of its own either, but a
+        # sub-query-level fusion result fell through both, meaning a
+        # repeated compound query whose individual clause happened to
+        # resolve to multiple sources internally re-ran
+        # _llm_pick_fusion_sources() and re-queried every fusion source
+        # on every single request, even identical repeats. Fixed by
+        # using the exact same cache-key convention the top-level
+        # fusion path already uses.
+        sub_source = "fusion"
+        sub_fusion_key = ",".join(sorted(intent))
+        sub_cache_key = f"fusion[{sub_fusion_key}]:{sub_q}"
+        cached_sub_fusion = _get_cached("fusion", sub_cache_key)
+        if cached_sub_fusion:
+            sub_result = cached_sub_fusion
+        else:
+            _route_stat("invoked_any_source", True)
+            sub_result = fusion.search(sub_q, intent)
+            if not _looks_empty(sub_result):
+                _set_cached("fusion", sub_cache_key, sub_result)
+    else:
+        sub_result, sub_source = _resolve_single_source(intent, sub_q)
+    if not _looks_empty(sub_result):
+        parts.append((sub_source, sub_result))
+    return parts
+
+
 def route_with_source(query: str, source: str = "auto", fusion_sources: list[str] | None = None) -> tuple[str, str]:
     """
     Route a query to the appropriate source(s) and return both the result
@@ -2411,88 +2684,55 @@ def route_with_source(query: str, source: str = "auto", fusion_sources: list[str
         sub_queries = _decompose(query)
         if len(sub_queries) > 1:
             _LOGGER.info("Routing %d decomposed sub-queries for: '%s'", len(sub_queries), query[:50])
-            parts = []  # list of (source, result) tuples
-            for sub_q in sub_queries:
-                # Each decomposed sub-query may itself contain a leading
-                # "if X, Y" structure that the top-level conditional check
-                # never sees — detect_conditional() only runs once, against
-                # the FULL original query, before decomposition. A query
-                # like "what is the weather and if the back door is
-                # unlocked, let me know" doesn't start with "if" so the
-                # top-level check correctly returns None, but the second
-                # decomposed sub-query ("if the back door is unlocked, let
-                # me know") absolutely does match and was never being
-                # re-checked at all.
-                #
-                # Mirrors the top-level handling exactly: extract the
-                # condition and search ONLY that (via a recursive call on
-                # the condition text, not the original "if X, Y" string),
-                # then frame the response. An earlier version of this fix
-                # recursed on the original sub_q string with a manual
-                # _depth counter meant to stop infinite recursion — but
-                # that counter blocked the recursive call's OWN necessary
-                # re-detection of the very same conditional it was meant
-                # to handle, since the depth incremented before the
-                # conditional was actually consumed. Passing the
-                # already-extracted condition (not the still-"if"-prefixed
-                # sub_q) sidesteps the whole problem: the condition text
-                # essentially never re-matches the leading "if/should/in
-                # case" pattern, so this naturally terminates without
-                # needing any artificial depth limit at all.
-                sub_conditional = detect_conditional(sub_q)
-                if sub_conditional:
-                    sub_condition, sub_consequence, sub_remainder = sub_conditional
-                    sub_condition_result, sub_source = route_with_source(sub_condition, "auto")
-                    sub_result = _frame_conditional_response(
-                        sub_condition, sub_consequence, sub_condition_result, sub_source
+            # Sub-queries are genuinely independent by construction —
+            # _decompose() only ever splits on conjunctions joining
+            # separate intents, and no sub-query's resolution reads
+            # another's result — so they run CONCURRENTLY rather than
+            # paying each sub-query's full cold cost back to back. A
+            # 3-intent cold compound query previously paid three stacked
+            # LLM-routing + source-fetch costs sequentially; this was the
+            # largest remaining sequential-work latency cost in the
+            # routing path after searxng.py's and _resolve_conditional()'s
+            # structurally identical fixes.
+            #
+            # A FRESH, per-call executor — deliberately NOT a shared
+            # module-level pool like fusion.py's — because these workers
+            # recurse into route_with_source(), which can itself hit this
+            # exact code path again (a sub-query's condition text that
+            # decomposes further): submitting into a shared pool from
+            # inside that same pool's own worker and blocking on the
+            # result is a real deadlock under saturation. A fresh pool
+            # per nesting level cannot deadlock (each level's workers
+            # wait only on a deeper level's own pool), and decomposed
+            # multi-intent queries are rare enough that per-call pool
+            # construction is not the unbounded-thread-pressure pattern
+            # fusion.py's hot path had — the same judgment already made
+            # for _resolve_conditional()'s own per-call executor.
+            #
+            # contextvars.copy_context() once per task, never shared —
+            # Context.run() is non-reentrant across concurrent execution
+            # (the identical constraint documented at every other
+            # executor site in this project). The copied Context shares
+            # the same _ROUTE_STATS dict object by reference, so cache/
+            # fallback facts recorded inside workers still reach
+            # route_query()'s per-request stats correctly.
+            #
+            # Futures are collected strictly IN SUBMISSION ORDER (a plain
+            # list walk, not as_completed()) — parts order determines the
+            # final response's section order, which must match the order
+            # the person actually asked things in, not network completion
+            # order.
+            max_workers = min(len(sub_queries), settings.decompose_max_parallel)
+            with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = [
+                    executor.submit(
+                        contextvars.copy_context().run, _resolve_decomposed_sub_query, sub_q
                     )
-                    if not _looks_empty(sub_condition_result):
-                        parts.append((sub_source, sub_result))
-                    # A real, separate intent followed the conditional
-                    # within this one decomposed sub-query — search it
-                    # independently too, rather than losing it or letting
-                    # it pollute the consequence text
-                    if sub_remainder:
-                        remainder_result, remainder_source = route_with_source(sub_remainder, "auto")
-                        if not _looks_empty(remainder_result):
-                            parts.append((remainder_source, remainder_result))
-                    continue
-
-                intent = detect_intent(sub_q)
-                if isinstance(intent, list):
-                    # Found via a deliberate complexity-reduction
-                    # investigation (comparing this dispatch against the
-                    # top-level single-query fusion dispatch, the same
-                    # side-by-side-comparison discipline that found two
-                    # real bugs during the prior extraction pass): a
-                    # decomposed sub-query that itself resolves to fusion
-                    # had NO caching at all, unlike every other path in
-                    # the system — every individual single-source
-                    # sub-query result gets cached via
-                    # _resolve_single_source(), the overall merged
-                    # decomposed response gets no cache of its own either,
-                    # but a sub-query-level fusion result fell through
-                    # both, meaning a repeated compound query whose
-                    # individual clause happened to resolve to multiple
-                    # sources internally re-ran _llm_pick_fusion_sources()
-                    # and re-queried every fusion source on every single
-                    # request, even identical repeats. Fixed by using the
-                    # exact same cache-key convention the top-level
-                    # fusion path already uses.
-                    sub_source = "fusion"
-                    sub_fusion_key = ",".join(sorted(intent))
-                    sub_cache_key = f"fusion[{sub_fusion_key}]:{sub_q}"
-                    cached_sub_fusion = _get_cached("fusion", sub_cache_key)
-                    if cached_sub_fusion:
-                        sub_result = cached_sub_fusion
-                    else:
-                        sub_result = fusion.search(sub_q, intent)
-                        if not _looks_empty(sub_result):
-                            _set_cached("fusion", sub_cache_key, sub_result)
-                else:
-                    sub_result, sub_source = _resolve_single_source(intent, sub_q)
-                if not _looks_empty(sub_result):
-                    parts.append((sub_source, sub_result))
+                    for sub_q in sub_queries
+                ]
+                parts = []  # list of (source, result) tuples
+                for future in futures:
+                    parts.extend(future.result())
 
             if parts:
                 return _merge_decomposed_parts(parts)
@@ -2507,8 +2747,16 @@ def route_with_source(query: str, source: str = "auto", fusion_sources: list[str
             source = "fusion"
         else:
             source = intent
+        # Recorded for route_query()'s failure reporting — if an
+        # exception fires past this point, /search can honestly report
+        # the source this query was actually headed to instead of the
+        # literal string "auto". Recursive calls overwrite this with
+        # whichever sub-query was being processed when things broke,
+        # which is strictly more informative for diagnosis, not less.
+        _route_stat("intended_source", source)
     else:
         _LOGGER.info("Source explicitly set to '%s' for query: '%s'", source, query[:50])
+        _route_stat("intended_source", source)
 
     # Handle fusion — LLM picks sources if none specified
     if source == "fusion":
@@ -2520,6 +2768,7 @@ def route_with_source(query: str, source: str = "auto", fusion_sources: list[str
         cached = _get_cached("fusion", cache_key_query)
         if cached:
             return cached, "fusion"
+        _route_stat("invoked_any_source", True)
         result = fusion.search(query, fusion_sources)
         if not _looks_empty(result):
             _set_cached("fusion", cache_key_query, result)

@@ -328,6 +328,22 @@ class Settings(BaseSettings):
     # every concurrent request the way fusion's source-fanout does).
     searxng_thread_pool_size: int = 4
 
+    # How many decomposed sub-queries route_with_source() resolves
+    # concurrently for one compound query. Sub-queries are genuinely
+    # independent by construction (see _decompose() — it only splits on
+    # conjunctions joining separate intents), so a 3-intent cold
+    # compound query no longer pays three stacked LLM-routing +
+    # source-fetch costs back to back. Uses a fresh, per-call executor
+    # bounded by min(len(sub_queries), this value) — deliberately NOT a
+    # shared module-level pool, since these workers recurse into
+    # route_with_source() itself and a shared pool submitting into
+    # itself and blocking is a real deadlock under saturation (see the
+    # comment at the dispatch site in app/router.py). This value caps
+    # per-query fanout; realistic decomposed queries are 2-4 intents,
+    # so the default covers them fully without letting a pathological
+    # many-conjunction query spin up unbounded concurrent source work.
+    decompose_max_parallel: int = 4
+
     # -------------------------------------------------------------------
     # Caching — result cache, routing cache, and per-source TTLs
     # -------------------------------------------------------------------

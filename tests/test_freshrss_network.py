@@ -65,7 +65,7 @@ class TestFreshRSSAuth:
         settings.freshrss_url = "http://freshrss"
         settings.freshrss_user = "testuser"
         try:
-            with patch("app.sources.freshrss.requests.post", return_value=_mock_auth_response(success=False)):
+            with patch("app.sources.freshrss._session.post", return_value=_mock_auth_response(success=False)):
                 result = freshrss.search("news")
             assert "error" in result.lower() or "could not authenticate" in result.lower()
         finally:
@@ -79,7 +79,7 @@ class TestFreshRSSAuth:
         settings.freshrss_url = "http://freshrss"
         settings.freshrss_user = "testuser"
         try:
-            with patch("app.sources.freshrss.requests.post", side_effect=requests.exceptions.ConnectionError("refused")):
+            with patch("app.sources.freshrss._session.post", side_effect=requests.exceptions.ConnectionError("refused")):
                 result = freshrss.search("news")
             assert "error" in result.lower()
         finally:
@@ -102,8 +102,8 @@ class TestFreshRSSArticles:
 
     def test_empty_feed_returns_no_articles_message(self):
         from app.sources import freshrss
-        with patch("app.sources.freshrss.requests.post", return_value=_mock_auth_response()), \
-             patch("app.sources.freshrss.requests.get", return_value=_mock_articles_response([])):
+        with patch("app.sources.freshrss._session.post", return_value=_mock_auth_response()), \
+             patch("app.sources.freshrss._session.get", return_value=_mock_articles_response([])):
             result = freshrss.search("news")
         assert "no recent articles" in result.lower()
 
@@ -114,8 +114,8 @@ class TestFreshRSSArticles:
             _make_item("Tech Update", "Tech", "Technology news"),
             _make_item("Sports Roundup", "Sports", "Sports news"),
         ]
-        with patch("app.sources.freshrss.requests.post", return_value=_mock_auth_response()), \
-             patch("app.sources.freshrss.requests.get", return_value=_mock_articles_response(items)):
+        with patch("app.sources.freshrss._session.post", return_value=_mock_auth_response()), \
+             patch("app.sources.freshrss._session.get", return_value=_mock_articles_response(items)):
             result = freshrss.search("news")
         assert "Politics Today" in result
         assert "Tech Update" in result
@@ -128,8 +128,8 @@ class TestFreshRSSArticles:
             _make_item("Sports Roundup", "Sports", "Game scores and highlights"),
             _make_item("Python Tutorial", "Dev", "How to use Python decorators"),
         ]
-        with patch("app.sources.freshrss.requests.post", return_value=_mock_auth_response()), \
-             patch("app.sources.freshrss.requests.get", return_value=_mock_articles_response(items)):
+        with patch("app.sources.freshrss._session.post", return_value=_mock_auth_response()), \
+             patch("app.sources.freshrss._session.get", return_value=_mock_articles_response(items)):
             result = freshrss.search("python programming")
         assert "Python Release" in result
         assert "Python Tutorial" in result
@@ -141,8 +141,8 @@ class TestFreshRSSArticles:
             _make_item("Sports Roundup", "Sports", "Game scores"),
             _make_item("Politics Today", "News", "Political update"),
         ]
-        with patch("app.sources.freshrss.requests.post", return_value=_mock_auth_response()), \
-             patch("app.sources.freshrss.requests.get", return_value=_mock_articles_response(items)):
+        with patch("app.sources.freshrss._session.post", return_value=_mock_auth_response()), \
+             patch("app.sources.freshrss._session.get", return_value=_mock_articles_response(items)):
             result = freshrss.search("medieval japanese pottery")
         assert "no articles specifically" in result.lower()
         assert "Sports Roundup" in result
@@ -150,8 +150,8 @@ class TestFreshRSSArticles:
     def test_articles_formatted_with_source(self):
         from app.sources import freshrss
         items = [_make_item("Test Article", "My Feed", "Article content here")]
-        with patch("app.sources.freshrss.requests.post", return_value=_mock_auth_response()), \
-             patch("app.sources.freshrss.requests.get", return_value=_mock_articles_response(items)):
+        with patch("app.sources.freshrss._session.post", return_value=_mock_auth_response()), \
+             patch("app.sources.freshrss._session.get", return_value=_mock_articles_response(items)):
             result = freshrss.search("news")
         assert "My Feed" in result
         assert "Test Article" in result

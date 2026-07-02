@@ -695,3 +695,33 @@ class TestWaitEventsSettling:
             f"faster than the first ({first_call_elapsed:.3f}s) — the "
             f"settling fix doesn't appear to be reducing real elapsed time"
         )
+
+class TestErrorPathDisconnectsBeforeDropping:
+    """Regression test: search()'s connection-error path previously did a
+    bare `_persistent_api = None` under the lock — orphaning a possibly
+    half-alive connection object (e.g. a login timeout whose socket had
+    genuinely connected) with its transport left open until GC. It must
+    instead close the transport via disconnect() at the one moment we
+    know the object is being discarded, matching get_connection()'s own
+    stale-object handling."""
+
+    def test_failed_fetch_disconnects_the_discarded_connection(self):
+        from unittest.mock import patch, MagicMock
+        from app.config import settings
+        import app.sources.uptime_kuma as uk
+
+        settings.uptime_kuma_url = "http://kuma"
+        settings.uptime_kuma_username = "admin"
+        try:
+            half_dead = MagicMock()
+            half_dead.get_monitors.side_effect = RuntimeError("timed out mid-fetch")
+            with patch("app.sources.uptime_kuma.get_connection", return_value=half_dead):
+                uk._persistent_api = half_dead
+                result = uk.search("are my services up")
+            assert "Could not connect" in result
+            half_dead.disconnect.assert_called_once()
+            assert uk._persistent_api is None
+        finally:
+            uk._persistent_api = None
+            settings.uptime_kuma_url = ""
+            settings.uptime_kuma_username = ""

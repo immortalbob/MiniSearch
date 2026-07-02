@@ -9,6 +9,7 @@ import sqlite3
 import logging
 from app.config import settings
 from datetime import datetime, timezone, timedelta
+from contextlib import closing
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -71,18 +72,17 @@ def _connect(db_path: str) -> sqlite3.Connection:
 def init_snapshot_db():
     """Create snapshot tables if they don't exist."""
     try:
-        con = _connect(SNAPSHOT_DB)
-        con.execute("""
-            CREATE TABLE IF NOT EXISTS snapshots (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                timestamp TEXT NOT NULL,
-                source TEXT NOT NULL,
-                content TEXT NOT NULL
-            )
-        """)
-        con.execute("CREATE INDEX IF NOT EXISTS idx_snapshots_source_time ON snapshots (source, timestamp DESC)")
-        con.commit()
-        con.close()
+        with closing(_connect(SNAPSHOT_DB)) as con:
+            con.execute("""
+                CREATE TABLE IF NOT EXISTS snapshots (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp TEXT NOT NULL,
+                    source TEXT NOT NULL,
+                    content TEXT NOT NULL
+                )
+            """)
+            con.execute("CREATE INDEX IF NOT EXISTS idx_snapshots_source_time ON snapshots (source, timestamp DESC)")
+            con.commit()
         _LOGGER.info("Snapshot DB initialized")
     except Exception as e:
         _LOGGER.warning("Could not initialize snapshot DB: %s", e)
@@ -91,31 +91,30 @@ def init_snapshot_db():
 def _store_snapshot(source: str, content: str):
     """Store a snapshot and prune old entries."""
     try:
-        con = _connect(SNAPSHOT_DB)
-        now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-        con.execute(
-            "INSERT INTO snapshots (timestamp, source, content) VALUES (?, ?, ?)",
-            (now, source, content)
-        )
-        # Prune old snapshots — keep only the most recent N per source,
-        # scaled per-source (see _RETENTION_PER_SOURCE above) so every
-        # source genuinely supports the longest documented time-window
-        # phrase. Falls back to the 24-hour-at-5-minute-intervals
-        # default (288) for any source not yet in the dict, rather than
-        # crashing — defensive against a future new snapshot source
-        # being added to JOB_INTERVALS_MINUTES without a corresponding
-        # update reaching this lookup, the same kind of two-places-to-
-        # update risk already found and fixed elsewhere this release
-        # cycle (the duplicated /backup file list in main.py).
-        retention = _RETENTION_PER_SOURCE.get(source, 288)
-        con.execute("""
-            DELETE FROM snapshots WHERE source = ? AND id NOT IN (
-                SELECT id FROM snapshots WHERE source = ?
-                ORDER BY id DESC LIMIT ?
+        with closing(_connect(SNAPSHOT_DB)) as con:
+            now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            con.execute(
+                "INSERT INTO snapshots (timestamp, source, content) VALUES (?, ?, ?)",
+                (now, source, content)
             )
-        """, (source, source, retention))
-        con.commit()
-        con.close()
+            # Prune old snapshots — keep only the most recent N per source,
+            # scaled per-source (see _RETENTION_PER_SOURCE above) so every
+            # source genuinely supports the longest documented time-window
+            # phrase. Falls back to the 24-hour-at-5-minute-intervals
+            # default (288) for any source not yet in the dict, rather than
+            # crashing — defensive against a future new snapshot source
+            # being added to JOB_INTERVALS_MINUTES without a corresponding
+            # update reaching this lookup, the same kind of two-places-to-
+            # update risk already found and fixed elsewhere this release
+            # cycle (the duplicated /backup file list in main.py).
+            retention = _RETENTION_PER_SOURCE.get(source, 288)
+            con.execute("""
+                DELETE FROM snapshots WHERE source = ? AND id NOT IN (
+                    SELECT id FROM snapshots WHERE source = ?
+                    ORDER BY id DESC LIMIT ?
+                )
+            """, (source, source, retention))
+            con.commit()
     except Exception as e:
         _LOGGER.warning("Could not store snapshot for '%s': %s", source, e)
 
@@ -123,12 +122,11 @@ def _store_snapshot(source: str, content: str):
 def _get_last_snapshots(source: str, limit: int = 2) -> list[str]:
     """Return the most recent N snapshots for a source."""
     try:
-        con = _connect(SNAPSHOT_DB)
-        rows = con.execute(
-            "SELECT content FROM snapshots WHERE source = ? ORDER BY id DESC LIMIT ?",
-            (source, limit)
-        ).fetchall()
-        con.close()
+        with closing(_connect(SNAPSHOT_DB)) as con:
+            rows = con.execute(
+                "SELECT content FROM snapshots WHERE source = ? ORDER BY id DESC LIMIT ?",
+                (source, limit)
+            ).fetchall()
         return [r[0] for r in rows]
     except Exception as e:
         _LOGGER.warning("Could not fetch snapshots for '%s': %s", source, e)
@@ -163,19 +161,33 @@ def get_snapshot_job_health() -> dict[str, dict]:
     now = datetime.now(timezone.utc)
     health = {}
 
+    # One connection and one query for ALL four sources, rather than the
+    # previous one-connection-per-source loop (four separate opens per
+    # /health call for what is a single tiny read) — found via a
+    # deliberate function-by-function audit. GROUP BY with MAX(id) is
+    # exactly SQLite's documented bare-column guarantee territory: with
+    # a single MAX() aggregate, the bare `timestamp` column is
+    # guaranteed to come from the row that produced the MAX — the same
+    # SQLite rule query_log_stats() in main.py cites for the inverse
+    # case (where the guarantee did NOT apply and had to be fixed).
+    latest_by_source: dict[str, str] = {}
+    db_error: str | None = None
+    try:
+        with closing(_connect(SNAPSHOT_DB)) as con:
+            rows = con.execute(
+                "SELECT source, timestamp, MAX(id) FROM snapshots GROUP BY source"
+            ).fetchall()
+        latest_by_source = {r[0]: r[1] for r in rows}
+    except Exception as e:
+        db_error = str(e)
+
     for source, interval_minutes in JOB_INTERVALS_MINUTES.items():
-        try:
-            con = _connect(SNAPSHOT_DB)
-            row = con.execute(
-                "SELECT timestamp FROM snapshots WHERE source = ? ORDER BY id DESC LIMIT 1",
-                (source,)
-            ).fetchone()
-            con.close()
-        except Exception as e:
-            health[source] = {"status": "unknown", "error": str(e)}
+        if db_error is not None:
+            health[source] = {"status": "unknown", "error": db_error}
             continue
 
-        if row is None:
+        timestamp = latest_by_source.get(source)
+        if timestamp is None:
             # No snapshot has ever been stored for this source — either
             # the job hasn't run yet (very early after startup) or it
             # has never once succeeded
@@ -186,9 +198,9 @@ def get_snapshot_job_health() -> dict[str, dict]:
             continue
 
         try:
-            last_timestamp = datetime.strptime(row[0], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+            last_timestamp = datetime.strptime(timestamp, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
         except Exception:
-            health[source] = {"status": "unknown", "error": f"unparseable timestamp: {row[0]!r}"}
+            health[source] = {"status": "unknown", "error": f"unparseable timestamp: {timestamp!r}"}
             continue
 
         minutes_since = (now - last_timestamp).total_seconds() / 60
@@ -196,7 +208,7 @@ def get_snapshot_job_health() -> dict[str, dict]:
 
         health[source] = {
             "status": "stale" if is_stale else "ok",
-            "last_snapshot": row[0],
+            "last_snapshot": timestamp,
             "minutes_since_last_snapshot": round(minutes_since, 1),
             "expected_interval_minutes": interval_minutes,
         }
@@ -208,12 +220,11 @@ def _get_snapshots_since(source: str, since_hours: int | float = 24) -> list[tup
     """Return all snapshots for a source since N hours ago."""
     try:
         since = (datetime.now(timezone.utc) - timedelta(hours=since_hours)).strftime("%Y-%m-%dT%H:%M:%SZ")
-        con = _connect(SNAPSHOT_DB)
-        rows = con.execute(
-            "SELECT timestamp, content FROM snapshots WHERE source = ? AND timestamp >= ? ORDER BY id ASC",
-            (source, since)
-        ).fetchall()
-        con.close()
+        with closing(_connect(SNAPSHOT_DB)) as con:
+            rows = con.execute(
+                "SELECT timestamp, content FROM snapshots WHERE source = ? AND timestamp >= ? ORDER BY id ASC",
+                (source, since)
+            ).fetchall()
         return [(r[0], r[1]) for r in rows]
     except Exception as e:
         _LOGGER.warning("Could not fetch snapshots since %dh for '%s': %s", since_hours, source, e)
@@ -558,19 +569,21 @@ def snapshot_ha():
     """Capture raw HA entity state snapshot as JSON for structured diffing."""
     try:
         import json
-        import requests
-        from app.config import settings
+        # Reuses home_assistant._get_states() rather than issuing its own
+        # bare requests.get() — found via a deliberate function-by-function
+        # audit: this function duplicated _get_states()'s exact fetch
+        # (same endpoint, same auth header, same timeout) line for line,
+        # meaning the snapshot job was one drift-prone copy of logic that
+        # already had a single owner, AND it bypassed home_assistant.py's
+        # persistent _session (fresh TCP setup on every scheduled run).
+        # _get_states() returns None both when HA is unconfigured and on
+        # fetch failure — it logs the failure itself — so one None check
+        # covers both of this function's previous early returns.
+        from app.sources.home_assistant import _get_states
 
-        if not settings.ha_url or not settings.ha_token:
+        states = _get_states()
+        if states is None:
             return
-
-        resp = requests.get(
-            f"{settings.ha_url}/api/states",
-            headers={"Authorization": f"Bearer {settings.ha_token}"},
-            timeout=10,
-        )
-        resp.raise_for_status()
-        states = resp.json()
 
         # Only store fields relevant to diffing — keep snapshot size small
         relevant = []

@@ -42,7 +42,7 @@ class TestSearxngQueryExpansion:
                 {"title": f"Result for {params['q']}", "url": f"https://example.com/{params['q']}", "content": "python programming content here"}
             ])
 
-        with patch("app.sources.searxng.requests.get", side_effect=fake_get), \
+        with patch("app.sources.searxng._session.get", side_effect=fake_get), \
              patch("app.sources.searxng.get_alternate_phrasing", return_value="top python coding tips"):
             searxng.search("best python programming guide")
 
@@ -181,7 +181,7 @@ class TestSearxngSearch:
         original = settings.searxng_request_timeout_seconds
         settings.searxng_request_timeout_seconds = 25
         try:
-            with patch("app.sources.searxng.requests.get", return_value=self._mock_response([])) as mock_get:
+            with patch("app.sources.searxng._session.get", return_value=self._mock_response([])) as mock_get:
                 searxng._fetch_searxng("test query")
             _, kwargs = mock_get.call_args
             assert kwargs["timeout"] == 25
@@ -194,7 +194,7 @@ class TestSearxngSearch:
             {"title": "Nginx Docs", "url": "https://nginx.org", "content": "Official nginx documentation and configuration guide."},
             {"title": "Nginx Tutorial", "url": "https://example.com", "content": "How to configure nginx for production use."},
         ]
-        with patch("app.sources.searxng.requests.get", return_value=self._mock_response(mock_results)):
+        with patch("app.sources.searxng._session.get", return_value=self._mock_response(mock_results)):
             result = searxng.search("nginx")
         assert "Nginx Docs" in result
         assert "nginx.org" in result
@@ -208,14 +208,14 @@ class TestSearxngSearch:
             {"title": f"Python Result {i}", "url": f"https://example.com/{i}", "content": f"Python programming content number {i} here."}
             for i in range(10)
         ]
-        with patch("app.sources.searxng.requests.get", return_value=self._mock_response(mock_results)):
+        with patch("app.sources.searxng._session.get", return_value=self._mock_response(mock_results)):
             result = searxng.search("python programming")
         # Should be capped at the configured top_n, not the old hardcoded 5
         assert result.count("Python Result") == 5
 
     def test_empty_results_returns_no_results_message(self):
         from app.sources import searxng
-        with patch("app.sources.searxng.requests.get", return_value=self._mock_response([])):
+        with patch("app.sources.searxng._session.get", return_value=self._mock_response([])):
             result = searxng.search("xyzzy nothing")
         assert "no results" in result.lower()
 
@@ -226,14 +226,14 @@ class TestSearxngSearch:
         mock_results = [
             {"title": "Some Result", "url": "https://example.com", "content": "Some content"},
         ]
-        with patch("app.sources.searxng.requests.get", return_value=self._mock_response(mock_results)):
+        with patch("app.sources.searxng._session.get", return_value=self._mock_response(mock_results)):
             result = searxng.search("test query")
         assert "no sufficiently relevant" in result.lower()
 
     def test_connection_error_returns_error_message(self):
         from app.sources import searxng
         import requests
-        with patch("app.sources.searxng.requests.get", side_effect=requests.exceptions.ConnectionError("refused")):
+        with patch("app.sources.searxng._session.get", side_effect=requests.exceptions.ConnectionError("refused")):
             result = searxng.search("test")
         assert "error" in result.lower()
 
@@ -249,7 +249,7 @@ class TestSearxngSearch:
         the same generic "connection failed" every other failure gets."""
         from app.sources import searxng
         import requests
-        with patch("app.sources.searxng.requests.get",
+        with patch("app.sources.searxng._session.get",
                    side_effect=requests.exceptions.ReadTimeout("Read timed out. (read timeout=10)")):
             result = searxng.search("test")
         assert "timed out" in result.lower()
@@ -262,7 +262,7 @@ class TestSearxngSearch:
         not the timeout-specific one."""
         from app.sources import searxng
         import requests
-        with patch("app.sources.searxng.requests.get",
+        with patch("app.sources.searxng._session.get",
                    side_effect=requests.exceptions.ConnectionError("Connection refused")):
             result = searxng.search("test")
         assert "connection failed" in result.lower()
@@ -292,7 +292,7 @@ class TestSearxngSearch:
         original_threshold = settings.web_news_score_threshold
         settings.web_news_score_threshold = -100
         try:
-            with patch("app.sources.searxng.requests.get", side_effect=fake_get), \
+            with patch("app.sources.searxng._session.get", side_effect=fake_get), \
                  patch.object(searxng, "get_alternate_phrasing", return_value="alternate python query"):
                 result = searxng.search("python programming guide")
         finally:
@@ -308,7 +308,7 @@ class TestSearxngSearch:
         'no results found' when SearXNG is actually unreachable."""
         from app.sources import searxng
         import requests
-        with patch("app.sources.searxng.requests.get", side_effect=requests.exceptions.ConnectionError("refused")):
+        with patch("app.sources.searxng._session.get", side_effect=requests.exceptions.ConnectionError("refused")):
             result = searxng._fetch_searxng("test")
         assert result is None
 
@@ -318,7 +318,7 @@ class TestSearxngSearch:
         mock_resp.status_code = 200
         mock_resp.json.return_value = {"results": []}
         mock_resp.raise_for_status.return_value = None
-        with patch("app.sources.searxng.requests.get", return_value=mock_resp):
+        with patch("app.sources.searxng._session.get", return_value=mock_resp):
             result = searxng._fetch_searxng("test")
         assert result == []
 
@@ -328,7 +328,7 @@ class TestSearxngSearch:
             {"title": "Result A", "url": "https://a.com", "content": "Detailed content about result topic A here."},
             {"title": "Result B", "url": "https://b.com", "content": "Detailed content about result topic B here."},
         ]
-        with patch("app.sources.searxng.requests.get", return_value=self._mock_response(mock_results)):
+        with patch("app.sources.searxng._session.get", return_value=self._mock_response(mock_results)):
             result = searxng.search("result topic")
         assert "---" in result
 
@@ -338,7 +338,7 @@ class TestSearxngSearch:
             {"title": "Unrelated Cooking Recipe", "url": "https://cooking.com", "content": "How to bake bread at home."},
             {"title": "Python Programming Guide", "url": "https://python.com", "content": "Complete python programming tutorial and guide."},
         ]
-        with patch("app.sources.searxng.requests.get", return_value=self._mock_response(mock_results)):
+        with patch("app.sources.searxng._session.get", return_value=self._mock_response(mock_results)):
             result = searxng.search("python programming guide")
         # The relevant result should appear first despite being listed second in raw results
         assert result.index("Python Programming Guide") < result.index("Unrelated Cooking Recipe")
@@ -351,7 +351,7 @@ class TestSearxngSearch:
             {"title": "Home", "url": "https://example.com/", "content": "Welcome"},
             {"title": "Python GPIO Setup Tutorial", "url": "https://example.com/tutorial", "content": "Complete tutorial covering python gpio setup on raspberry pi."},
         ]
-        with patch("app.sources.searxng.requests.get", return_value=self._mock_response(mock_results)):
+        with patch("app.sources.searxng._session.get", return_value=self._mock_response(mock_results)):
             result = searxng.search("python gpio setup")
         assert "Python GPIO Setup Tutorial" in result
         assert result.count("**Home**") == 0

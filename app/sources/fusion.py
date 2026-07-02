@@ -198,17 +198,24 @@ def _looks_empty(result: str) -> bool:
         # message, regardless of what words happen to appear inside it.
         return False
     result_lower = result.lower().strip()
-    empty_phrases = [
-        "no results found", "no recent articles", "not yet implemented",
-        "could not fetch", "no books available", "could not determine",
-        "unknown source", "not configured", "could not connect",
-        "error:", "error reaching", "error fetching",
-        "no sufficiently relevant results", "no monitors found",
-        "unable to retrieve", "no valid sources", "no results returned",
-        "no entity states returned", "no matching entities found",
-        "no significant changes",
-    ]
-    return any(phrase in result_lower for phrase in empty_phrases)
+    return any(phrase in result_lower for phrase in _EMPTY_PHRASES)
+
+
+# Hoisted from _looks_empty()'s body — the function is called on every
+# single source result (fusion filtering, FALLBACK_CHAIN checks,
+# decomposed sub-query filtering), and rebuilding a 20-element list per
+# call is pure per-call allocation for a set of phrases that never
+# changes at runtime. A tuple, not a list: immutable module state.
+_EMPTY_PHRASES = (
+    "no results found", "no recent articles", "not yet implemented",
+    "could not fetch", "no books available", "could not determine",
+    "unknown source", "not configured", "could not connect",
+    "error:", "error reaching", "error fetching",
+    "no sufficiently relevant results", "no monitors found",
+    "unable to retrieve", "no valid sources", "no results returned",
+    "no entity states returned", "no matching entities found",
+    "no significant changes",
+)
 
 
 def _truncate(result: str, max_chars: int | None = None) -> str:

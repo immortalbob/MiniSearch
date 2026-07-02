@@ -34,6 +34,7 @@ import logging
 import random
 import re
 import sqlite3
+from contextlib import closing
 import time
 from datetime import datetime, timezone
 
@@ -62,6 +63,7 @@ def _connect(db_path: str) -> sqlite3.Connection:
 def init_adversarial_db():
     """Create the adversarial_combinations table if it doesn't exist.
     Mirrors snapshots.init_snapshot_db()'s exact pattern."""
+    con = None
     try:
         con = _connect(ADVERSARIAL_DB)
         con.execute("""
@@ -155,10 +157,14 @@ def init_adversarial_db():
         """)
 
         con.commit()
-        con.close()
         _LOGGER.info("Adversarial testing DB initialized")
     except Exception as e:
         _LOGGER.warning("Could not initialize adversarial testing DB: %s", e)
+    finally:
+        # Guaranteed close even when a statement above raises — see
+        # query_log_stats() in main.py for the pass-wide rationale.
+        if con is not None:
+            con.close()
 
 
 # ---------------------------------------------------------------------------
@@ -429,12 +435,11 @@ RECIPES = {
 def _already_tried(fingerprint: tuple) -> bool:
     """Check whether this fingerprint has already been recorded."""
     try:
-        con = _connect(ADVERSARIAL_DB)
-        row = con.execute(
-            "SELECT 1 FROM adversarial_combinations WHERE fingerprint = ?",
-            (json.dumps(fingerprint),)
-        ).fetchone()
-        con.close()
+        with closing(_connect(ADVERSARIAL_DB)) as con:
+            row = con.execute(
+                "SELECT 1 FROM adversarial_combinations WHERE fingerprint = ?",
+                (json.dumps(fingerprint),)
+            ).fetchone()
         return row is not None
     except Exception as e:
         _LOGGER.warning("Could not check fingerprint history: %s", e)
@@ -642,14 +647,13 @@ def _check_latency_outlier(recipe_name: str, latency_ms: int) -> str | None:
     """A generated query taking meaningfully longer than the same recipe's
     own historical p95 — independent of content correctness."""
     try:
-        con = _connect(ADVERSARIAL_DB)
-        rows = con.execute(
-            "SELECT last_latency_ms FROM adversarial_combinations "
-            "WHERE recipe_name = ? AND last_latency_ms IS NOT NULL "
-            "ORDER BY id DESC LIMIT 50",
-            (recipe_name,)
-        ).fetchall()
-        con.close()
+        with closing(_connect(ADVERSARIAL_DB)) as con:
+            rows = con.execute(
+                "SELECT last_latency_ms FROM adversarial_combinations "
+                "WHERE recipe_name = ? AND last_latency_ms IS NOT NULL "
+                "ORDER BY id DESC LIMIT 50",
+                (recipe_name,)
+            ).fetchall()
     except Exception:
         return None
 
@@ -751,6 +755,7 @@ def _record_result(
     excerpt = (result or "")[:EXCERPT_MAX_CHARS] if flagged_reason else None
 
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    con = None
     try:
         con = _connect(ADVERSARIAL_DB)
         existing = con.execute(
@@ -845,9 +850,13 @@ def _record_result(
                     (query, source_used, latency_ms, flagged_reason, now, fingerprint_json)
                 )
         con.commit()
-        con.close()
     except Exception as e:
         _LOGGER.warning("Could not record adversarial test result: %s", e)
+    finally:
+        # Guaranteed close even when a statement above raises — see
+        # query_log_stats() in main.py for the pass-wide rationale.
+        if con is not None:
+            con.close()
 
 
 def run_adversarial_test_cycle() -> dict:
@@ -943,21 +952,20 @@ def get_adversarial_test_summary() -> dict:
         return {"status": "disabled"}
 
     try:
-        con = _connect(ADVERSARIAL_DB)
-        total_row = con.execute("SELECT COUNT(*) FROM adversarial_combinations").fetchone()
-        # Matches get_flagged_combinations()'s default (include_dismissed=
-        # False) definition exactly — the count here and the actual rows
-        # returned by GET /adversarial/flagged must never silently
-        # disagree about what "flagged for review" means.
-        flagged_row = con.execute(
-            "SELECT COUNT(*) FROM adversarial_combinations "
-            "WHERE (last_flagged_reason IS NOT NULL OR ever_flagged = 1) "
-            "AND (review_status IS NULL OR review_status != 'dismissed')"
-        ).fetchone()
-        last_run_row = con.execute(
-            "SELECT MAX(last_run_timestamp) FROM adversarial_combinations"
-        ).fetchone()
-        con.close()
+        with closing(_connect(ADVERSARIAL_DB)) as con:
+            total_row = con.execute("SELECT COUNT(*) FROM adversarial_combinations").fetchone()
+            # Matches get_flagged_combinations()'s default (include_dismissed=
+            # False) definition exactly — the count here and the actual rows
+            # returned by GET /adversarial/flagged must never silently
+            # disagree about what "flagged for review" means.
+            flagged_row = con.execute(
+                "SELECT COUNT(*) FROM adversarial_combinations "
+                "WHERE (last_flagged_reason IS NOT NULL OR ever_flagged = 1) "
+                "AND (review_status IS NULL OR review_status != 'dismissed')"
+            ).fetchone()
+            last_run_row = con.execute(
+                "SELECT MAX(last_run_timestamp) FROM adversarial_combinations"
+            ).fetchone()
     except Exception as e:
         return {"status": "unknown", "error": str(e)}
 
@@ -1015,27 +1023,26 @@ def get_flagged_combinations(limit: int = 50, include_dismissed: bool = False) -
     default working view.
     """
     try:
-        con = _connect(ADVERSARIAL_DB)
-        if include_dismissed:
-            where_clause = "WHERE last_flagged_reason IS NOT NULL OR ever_flagged = 1"
-        else:
-            where_clause = (
-                "WHERE (last_flagged_reason IS NOT NULL OR ever_flagged = 1) "
-                "AND (review_status IS NULL OR review_status != 'dismissed')"
-            )
-        rows = con.execute(
-            f"""SELECT fingerprint, recipe_name, first_seen_timestamp, times_generated,
-                      last_query_text, last_source_used, last_latency_ms,
-                      last_flagged_reason, last_run_timestamp,
-                      ever_flagged, first_flagged_reason, first_flagged_timestamp,
-                      review_status, last_flagged_result_excerpt
-               FROM adversarial_combinations
-               {where_clause}
-               ORDER BY last_run_timestamp DESC
-               LIMIT ?""",
-            (limit,)
-        ).fetchall()
-        con.close()
+        with closing(_connect(ADVERSARIAL_DB)) as con:
+            if include_dismissed:
+                where_clause = "WHERE last_flagged_reason IS NOT NULL OR ever_flagged = 1"
+            else:
+                where_clause = (
+                    "WHERE (last_flagged_reason IS NOT NULL OR ever_flagged = 1) "
+                    "AND (review_status IS NULL OR review_status != 'dismissed')"
+                )
+            rows = con.execute(
+                f"""SELECT fingerprint, recipe_name, first_seen_timestamp, times_generated,
+                          last_query_text, last_source_used, last_latency_ms,
+                          last_flagged_reason, last_run_timestamp,
+                          ever_flagged, first_flagged_reason, first_flagged_timestamp,
+                          review_status, last_flagged_result_excerpt
+                   FROM adversarial_combinations
+                   {where_clause}
+                   ORDER BY last_run_timestamp DESC
+                   LIMIT ?""",
+                (limit,)
+            ).fetchall()
     except Exception as e:
         _LOGGER.warning("Could not fetch flagged adversarial combinations: %s", e)
         return []
@@ -1072,14 +1079,13 @@ def dismiss_flagged_combination(fingerprint: str) -> bool:
     default view, not the underlying history.
     """
     try:
-        con = _connect(ADVERSARIAL_DB)
-        cursor = con.execute(
-            "UPDATE adversarial_combinations SET review_status = 'dismissed' WHERE fingerprint = ?",
-            (fingerprint,)
-        )
-        con.commit()
-        updated = cursor.rowcount > 0
-        con.close()
+        with closing(_connect(ADVERSARIAL_DB)) as con:
+            cursor = con.execute(
+                "UPDATE adversarial_combinations SET review_status = 'dismissed' WHERE fingerprint = ?",
+                (fingerprint,)
+            )
+            con.commit()
+            updated = cursor.rowcount > 0
         return updated
     except Exception as e:
         _LOGGER.warning("Could not dismiss flagged combination %r: %s", fingerprint, e)
@@ -1106,14 +1112,13 @@ def undismiss_flagged_combination(fingerprint: str) -> bool:
     restores the exact prior state, not a new, third state.
     """
     try:
-        con = _connect(ADVERSARIAL_DB)
-        cursor = con.execute(
-            "UPDATE adversarial_combinations SET review_status = NULL WHERE fingerprint = ?",
-            (fingerprint,)
-        )
-        con.commit()
-        updated = cursor.rowcount > 0
-        con.close()
+        with closing(_connect(ADVERSARIAL_DB)) as con:
+            cursor = con.execute(
+                "UPDATE adversarial_combinations SET review_status = NULL WHERE fingerprint = ?",
+                (fingerprint,)
+            )
+            con.commit()
+            updated = cursor.rowcount > 0
         return updated
     except Exception as e:
         _LOGGER.warning("Could not undismiss flagged combination %r: %s", fingerprint, e)

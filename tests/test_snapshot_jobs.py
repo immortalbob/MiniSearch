@@ -116,7 +116,7 @@ class TestSnapshotHA:
         states = [
             {"entity_id": "lock.front_door", "state": "locked", "attributes": {"friendly_name": "Front Door"}},
         ]
-        with patch("requests.get", return_value=self._mock_states_response(states)):
+        with patch("app.sources.home_assistant._session.get", return_value=self._mock_states_response(states)):
             snapshot_ha()
         snapshots = _get_last_snapshots("ha", limit=1)
         stored = json.loads(snapshots[0])
@@ -129,7 +129,7 @@ class TestSnapshotHA:
             {"entity_id": "binary_sensor.front_door", "state": "off",
              "attributes": {"device_class": "door", "friendly_name": "Front Door"}},
         ]
-        with patch("requests.get", return_value=self._mock_states_response(states)):
+        with patch("app.sources.home_assistant._session.get", return_value=self._mock_states_response(states)):
             snapshot_ha()
         snapshots = _get_last_snapshots("ha", limit=1)
         stored = json.loads(snapshots[0])
@@ -142,7 +142,7 @@ class TestSnapshotHA:
             {"entity_id": "binary_sensor.dark_mode", "state": "on",
              "attributes": {"device_class": "", "friendly_name": "Dark Mode"}},
         ]
-        with patch("requests.get", return_value=self._mock_states_response(states)):
+        with patch("app.sources.home_assistant._session.get", return_value=self._mock_states_response(states)):
             snapshot_ha()
         snapshots = _get_last_snapshots("ha", limit=1)
         stored = json.loads(snapshots[0])
@@ -154,7 +154,7 @@ class TestSnapshotHA:
             {"entity_id": "sensor.phone_battery", "state": "85",
              "attributes": {"device_class": "battery", "friendly_name": "Phone Battery"}},
         ]
-        with patch("requests.get", return_value=self._mock_states_response(states)):
+        with patch("app.sources.home_assistant._session.get", return_value=self._mock_states_response(states)):
             snapshot_ha()
         snapshots = _get_last_snapshots("ha", limit=1)
         stored = json.loads(snapshots[0])
@@ -167,7 +167,7 @@ class TestSnapshotHA:
             {"entity_id": "light.bedroom", "state": "on", "attributes": {"friendly_name": "Bedroom Light"}},
             {"entity_id": "switch.fan", "state": "off", "attributes": {"friendly_name": "Fan"}},
         ]
-        with patch("requests.get", return_value=self._mock_states_response(states)):
+        with patch("app.sources.home_assistant._session.get", return_value=self._mock_states_response(states)):
             snapshot_ha()
         snapshots = _get_last_snapshots("ha", limit=1)
         stored = json.loads(snapshots[0])
@@ -179,7 +179,7 @@ class TestSnapshotHA:
             {"entity_id": "lock.back_door", "state": "locked",
              "attributes": {"friendly_name": "Back Door"}},
         ]
-        with patch("requests.get", return_value=self._mock_states_response(states)):
+        with patch("app.sources.home_assistant._session.get", return_value=self._mock_states_response(states)):
             snapshot_ha()
         snapshots = _get_last_snapshots("ha", limit=1)
         stored = json.loads(snapshots[0])
@@ -188,14 +188,14 @@ class TestSnapshotHA:
 
     def test_does_not_raise_on_connection_error(self, temp_snapshot_db):
         from app.snapshots import snapshot_ha
-        with patch("requests.get", side_effect=req.exceptions.ConnectionError()):
+        with patch("app.sources.home_assistant._session.get", side_effect=req.exceptions.ConnectionError()):
             snapshot_ha()  # should not raise
 
     def test_does_not_raise_on_http_error(self, temp_snapshot_db):
         from app.snapshots import snapshot_ha
         mock_resp = MagicMock()
         mock_resp.raise_for_status.side_effect = req.exceptions.HTTPError("401")
-        with patch("requests.get", return_value=mock_resp):
+        with patch("app.sources.home_assistant._session.get", return_value=mock_resp):
             snapshot_ha()  # should not raise
 
     def test_mixed_relevant_and_irrelevant_entities(self, temp_snapshot_db):
@@ -207,7 +207,7 @@ class TestSnapshotHA:
              "attributes": {"device_class": "battery", "friendly_name": "Battery 1"}},
             {"entity_id": "binary_sensor.dark_mode", "state": "on", "attributes": {"friendly_name": "Dark Mode"}},
         ]
-        with patch("requests.get", return_value=self._mock_states_response(states)):
+        with patch("app.sources.home_assistant._session.get", return_value=self._mock_states_response(states)):
             snapshot_ha()
         snapshots = _get_last_snapshots("ha", limit=1)
         stored = json.loads(snapshots[0])

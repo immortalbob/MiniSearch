@@ -238,7 +238,7 @@ class TestHealthConcurrentSourceChecks:
         # app.sources.kiwix, a genuinely separate import from app.main's
         # — both need mocking.
         with patch("app.main.requests.get", side_effect=slow_get), \
-             patch("app.sources.kiwix.requests.get", side_effect=slow_get):
+             patch("app.sources.kiwix._session.get", side_effect=slow_get):
             start = time.monotonic()
             resp = client.get("/health")
             elapsed = time.monotonic() - start
@@ -274,7 +274,7 @@ class TestHealthConcurrentSourceChecks:
             return resp
 
         with patch("app.main.requests.get", side_effect=variable_speed_get), \
-             patch("app.sources.kiwix.requests.get", side_effect=variable_speed_get):
+             patch("app.sources.kiwix._session.get", side_effect=variable_speed_get):
             start = time.monotonic()
             resp = client.get("/health")
             elapsed = time.monotonic() - start
@@ -518,15 +518,15 @@ class TestFallbackDetection:
     """Tests for the fallback_occurred detection logic in /search and its
     surfacing in /logs/stats.
 
-    Detected via a single boolean column, computed by comparing the
-    pre-route intended source against the actual resolved source from
-    route_with_source() — deliberately NOT by changing
-    route_with_source()'s own return signature, since that function
-    already recurses into itself at 4 internal call sites (conditional
-    detection's condition/remainder handling, and the same for decomposed
-    sub-queries), so widening its return tuple would touch every one of
-    those, a much larger and riskier change than this comparison needed
-    to require."""
+    Recorded directly at the one code point where a fallback genuinely
+    happens (router._resolve_single_source(), via route_query()'s
+    _ROUTE_STATS channel) — replacing the original after-the-fact
+    inference that compared main.py's pre-computed intent against the
+    resolved source. That inference was deliberately chosen at the time
+    over widening route_with_source()'s return signature, but was
+    structurally blind to fallbacks inside decomposed sub-queries (its
+    own comment said so); the stats channel keeps the signature
+    unchanged AND sees those too."""
 
     def setup_method(self):
         from app.main import _LOG_DB
@@ -620,22 +620,86 @@ class TestFallbackDetection:
         assert fallback_by_target["kiwix_or_news_fallback_to_web"] == 2
 
 
+class TestSearchNoWastedIntentDetection:
+    """Regression tests for the /search pre-routing detect_intent() call
+    removed when the endpoint moved to route_query(). The old endpoint
+    resolved the FULL query's intent before routing, purely to compute
+    the `cached` flag — a full, wasted cold LLM routing call for any
+    query that route_with_source() decomposes or treats as conditional,
+    since those paths never route the full query at all, plus a `cached`
+    flag computed against a cache key those paths never use."""
+
+    def test_compound_query_never_intent_detects_the_full_query(self, client):
+        """A decomposable query must only ever have detect_intent()
+        called on its SUB-queries, never on the full compound string —
+        the full-query call was the wasted LLM cost."""
+        from unittest.mock import patch
+        import app.router as router_module
+
+        full_query = "what is the weather today and also lights status"
+        seen_queries = []
+
+        def tracking_intent(q):
+            seen_queries.append(q)
+            return "forecast" if "weather" in q else "ha"
+
+        original_map = dict(router_module.SOURCE_MAP)
+        router_module.SOURCE_MAP["forecast"] = lambda q: "Today will be clear."
+        router_module.SOURCE_MAP["ha"] = lambda q: "**Lights:**\n- Kitchen: on"
+        try:
+            with patch("app.router.detect_intent", side_effect=tracking_intent):
+                resp = client.post("/search", json={"query": full_query, "source": "auto"})
+        finally:
+            router_module.SOURCE_MAP.update(original_map)
+
+        assert resp.status_code == 200
+        assert seen_queries, "expected sub-query intent detection to run"
+        assert full_query not in seen_queries, (
+            "detect_intent() ran against the full compound query — the "
+            "exact wasted call route_query() exists to eliminate"
+        )
+
+    def test_cached_flag_true_only_when_served_entirely_from_cache(self, client):
+        """The cached flag now reflects what actually happened: True on
+        a genuine warm hit, False on the cold call that populated it."""
+        import app.router as router_module
+        from app.router import clear_cache
+
+        original_map = dict(router_module.SOURCE_MAP)
+        router_module.SOURCE_MAP["forecast"] = lambda q: "Today will be clear."
+        try:
+            clear_cache()
+            cold = client.post("/search", json={"query": "cached flag test", "source": "forecast"})
+            warm = client.post("/search", json={"query": "cached flag test", "source": "forecast"})
+        finally:
+            router_module.SOURCE_MAP.update(original_map)
+            clear_cache()
+
+        assert cold.json()["cached"] is False
+        assert warm.json()["cached"] is True
+
+
 class TestSearchFailureReportsRealSource:
     """Regression tests for a real, significant bug found via a
     deliberate "bulletproofing" pass: when /search's auto-routing path
     raised an exception, source_used was set to request.source — which
     is just the literal string "auto" whenever auto-routing was
-    requested, not a real source name. `intent` (computed before the
-    try block specifically to build the cache-check key) is the actual
-    source this query was about to be routed to before the exception
-    occurred — reporting it instead gives a genuinely useful answer to
-    "what was this query trying to do" rather than echoing back a
-    non-answer."""
+    requested, not a real source name. Originally fixed by reporting
+    main.py's own pre-computed intent; now provided directly by
+    router.route_query(), which records the intended source at the
+    exact point route_with_source()'s own intent resolution happens
+    (via the _ROUTE_STATS channel) and reports it on failure — same
+    honest answer to "what was this query trying to do", one layer
+    closer to where the answer actually lives. These tests exercise
+    the real route_query() with only the layers underneath it mocked,
+    so the stats channel itself is genuinely under test."""
 
     def test_auto_routing_failure_reports_resolved_single_source(self, client):
         from unittest.mock import patch
-        with patch("app.main.route_with_source", side_effect=Exception("simulated failure")), \
-             patch("app.main.detect_intent", return_value="kiwix"):
+        # detect_intent resolves to kiwix, then the actual source
+        # resolution blows up — the response must name kiwix, not "auto".
+        with patch("app.router._resolve_single_source", side_effect=Exception("simulated failure")), \
+             patch("app.router.detect_intent", return_value="kiwix"):
             resp = client.post("/search", json={"query": "test auto failure", "source": "auto"})
         data = resp.json()
         assert data["success"] is False
@@ -643,24 +707,35 @@ class TestSearchFailureReportsRealSource:
 
     def test_auto_routing_failure_with_fusion_intent_reports_fusion(self, client):
         from unittest.mock import patch
-        with patch("app.main.route_with_source", side_effect=Exception("simulated failure")), \
-             patch("app.main.detect_intent", return_value=["kiwix", "web"]):
+        with patch("app.router.fusion.search", side_effect=Exception("simulated failure")), \
+             patch("app.router.detect_intent", return_value=["kiwix", "web"]):
             resp = client.post("/search", json={"query": "test fusion failure", "source": "auto"})
         data = resp.json()
         assert data["success"] is False
         assert data["source_used"] == "fusion"
 
     def test_explicit_source_failure_still_reports_that_source(self, client):
-        """Confirms the fix didn't change behavior for an explicitly-
-        requested source — `intent` is None in that case (intent
-        detection only runs for source="auto"), so the original
-        request.source is still correctly reported."""
+        """Confirms an explicitly-requested source is still correctly
+        reported on failure — route_query() records it as the intended
+        source before anything can break."""
         from unittest.mock import patch
-        with patch("app.main.route_with_source", side_effect=Exception("simulated failure")):
+        with patch("app.router._resolve_single_source", side_effect=Exception("simulated failure")):
             resp = client.post("/search", json={"query": "test explicit failure", "source": "forecast"})
         data = resp.json()
         assert data["success"] is False
         assert data["source_used"] == "forecast"
+
+    def test_failure_before_any_intent_resolution_reports_requested_source(self, client):
+        """An exception that fires before route_with_source() ever
+        resolves an intent (e.g. inside conditional detection) has no
+        better answer available — the requested source is honestly
+        reported as-is."""
+        from unittest.mock import patch
+        with patch("app.router.detect_conditional", side_effect=Exception("simulated failure")):
+            resp = client.post("/search", json={"query": "test early failure", "source": "auto"})
+        data = resp.json()
+        assert data["success"] is False
+        assert data["source_used"] == "auto"
 
 
 class TestAPIKeyAuth:

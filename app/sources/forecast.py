@@ -5,6 +5,15 @@ from app.config import settings
 
 _LOGGER = logging.getLogger(__name__)
 
+# Persistent HTTP session — connection reuse across every Open-Meteo
+# fetch, the same shape as app/llm.py's fix and searxng.py's _session
+# (see searxng.py's comment for the shared thread-safety rationale:
+# never mutated after creation, only ever `.get()`). Open-Meteo is the
+# one EXTERNAL (internet) HTTP dependency among the sources, so it's
+# the one where TCP + TLS setup per call genuinely costs the most —
+# a reused connection skips the full handshake on repeat forecasts.
+_session = requests.Session()
+
 WMO = {
     0: "clear", 1: "mostly clear", 2: "partly cloudy", 3: "overcast",
     45: "foggy", 48: "foggy",
@@ -56,7 +65,7 @@ def search(query: str) -> str:
         return "Forecast is not configured. Set FORECAST_LATITUDE and FORECAST_LONGITUDE."
 
     try:
-        response = requests.get(
+        response = _session.get(
             "https://api.open-meteo.com/v1/forecast",
             params={
                 "latitude": settings.forecast_latitude,

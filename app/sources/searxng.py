@@ -32,6 +32,25 @@ _searxng_executor = concurrent.futures.ThreadPoolExecutor(
     thread_name_prefix="searxng",
 )
 
+# Persistent HTTP session — connection reuse across every SearXNG fetch,
+# the identical fix app/llm.py already applied to its own per-call-TCP-
+# connection cost (see that module's _session comment for the full
+# thread-safety analysis this relies on: requests.Session is safe for
+# concurrent read-only use, and this module never mutates the session
+# after creation — it's only ever `.get()` from the two worker threads).
+# Web is a hot fusion source (every fusion query including `web` lands
+# here, plus every direct web route and every FALLBACK_CHAIN fallback
+# from kiwix/news), and each search() issues up to TWO fetches (primary
+# + alternate phrasing), so the previous bare requests.get() paid a
+# fresh TCP setup/teardown twice per query with zero reuse. Same-LAN
+# setup cost is small per call, but it's pure waste at this call
+# frequency — and requests' default adapter transparently reopens any
+# pooled connection that's gone stale, so there's no liveness tracking
+# to get wrong. Default pool sizing (10) is deliberate: SearXNG is
+# same-host/same-LAN, unlike the cross-machine LLM backend that needed
+# llm.py's explicitly-sized pool.
+_session = requests.Session()
+
 
 def _fetch_searxng(query: str, raise_on_timeout: bool = False) -> list[dict] | None:
     """Fetch raw SearXNG results for a single query.
@@ -57,7 +76,7 @@ def _fetch_searxng(query: str, raise_on_timeout: bool = False) -> list[dict] | N
     distinct user-facing message.
     """
     try:
-        resp = requests.get(
+        resp = _session.get(
             f"{settings.searxng_url}/search",
             params={"q": query, "format": "json", "language": "en"},
             headers={"Accept": "application/json"},

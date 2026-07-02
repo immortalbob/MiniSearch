@@ -7,6 +7,16 @@ from app.config import settings
 
 _LOGGER = logging.getLogger(__name__)
 
+# Persistent HTTP session — connection reuse across every Kiwix call,
+# the same shape as app/llm.py's fix and searxng.py's _session (see
+# searxng.py's comment for the shared thread-safety rationale: never
+# mutated after creation, only ever `.get()`). Kiwix is the single
+# heaviest HTTP consumer in the project: one query can issue a catalog
+# page fetch, per-book /search requests during multi-book fusion, AND
+# an article fetch per selected result — each of which previously paid
+# its own fresh TCP setup/teardown with zero reuse.
+_session = requests.Session()
+
 # Lazy imports to avoid circular imports
 def _get_routing_fns():
     from app.router import _get_routing, _set_routing
@@ -43,7 +53,7 @@ _book_cache: list[dict] = []
 def _fetch_catalog_page(url: str) -> list[dict]:
     """Fetch one page of the Kiwix OPDS catalog and return book entries."""
     try:
-        resp = requests.get(url, timeout=5)
+        resp = _session.get(url, timeout=5)
         resp.raise_for_status()
         root = ET.fromstring(resp.content)
         ns = {
@@ -280,7 +290,7 @@ def _search_book(query: str, book: str, limit: int | None = None) -> list:
     if limit is None:
         limit = settings.kiwix_search_limit
     try:
-        response = requests.get(
+        response = _session.get(
             f"{settings.kiwix_url}/search",
             params={"pattern": query, "books.name": book, "limit": limit},
             timeout=5,
@@ -326,7 +336,7 @@ def _fetch_article(url: str, max_chars: int | None = None) -> str:
     if max_chars is None:
         max_chars = settings.kiwix_article_max_chars
     try:
-        response = requests.get(url, timeout=10)
+        response = _session.get(url, timeout=10)
         response.raise_for_status()
         soup = BeautifulSoup(response.content, "html.parser")
         # Found via a deliberate "bulletproofing" pass: ".toc" and
@@ -460,21 +470,30 @@ def _is_definitional_query(query: str) -> bool:
     These queries benefit from encyclopedic sources like Wikipedia over Q&A threads.
     """
     q = query.lower().strip()
-    definitional_patterns = [
-        "what is", "what are", "what was", "what were",
-        "tell me about", "explain", "describe", "define",
-        "how does", "how do", "how did",
-        "who is", "who was", "who were",
-        "history of", "overview of", "introduction to",
-        # Colloquial equivalents — "what's the deal with X", "what's up with
-        # X", "X thing I keep hearing about" are all definitional asks
-        # phrased casually rather than formally
-        "what's the deal with", "whats the deal with",
-        "what's up with", "whats up with",
-        "what's this about", "whats this about",
-        "what's the story with", "whats the story with",
-    ]
-    return any(q.startswith(p) or p in q for p in definitional_patterns)
+    # `p in q` alone — the previous `q.startswith(p) or p in q` was
+    # redundant, since any prefix match is by definition also a
+    # substring match; startswith could never change the outcome.
+    return any(p in q for p in _DEFINITIONAL_PATTERNS)
+
+
+# Hoisted from _is_definitional_query()'s body — the check runs once per
+# scored result during search (see _score_result()), and rebuilding a
+# 20-element list per call is pure per-call allocation for a set of
+# phrases that never changes at runtime. A tuple: immutable module state.
+_DEFINITIONAL_PATTERNS = (
+    "what is", "what are", "what was", "what were",
+    "tell me about", "explain", "describe", "define",
+    "how does", "how do", "how did",
+    "who is", "who was", "who were",
+    "history of", "overview of", "introduction to",
+    # Colloquial equivalents — "what's the deal with X", "what's up with
+    # X", "X thing I keep hearing about" are all definitional asks
+    # phrased casually rather than formally
+    "what's the deal with", "whats the deal with",
+    "what's up with", "whats up with",
+    "what's this about", "whats this about",
+    "what's the story with", "whats the story with",
+)
 
 
 def _score_result(result: dict, query: str, primary_book: str) -> int:
@@ -878,9 +897,27 @@ def search(query: str) -> str:
     if not all_results:
         return f"No results found in {', '.join(selected_books)}."
 
-    scored = sorted(all_results, key=lambda r: _score_result(r, query, selected_books[0]), reverse=True)
+    # Decorate-sort-once — each result's score is computed exactly one
+    # time, up front. Found via a deliberate function-by-function audit:
+    # the previous shape recomputed _score_result() for the same result
+    # up to three separate times (once inside the sort key, once more
+    # for `top`, and once more per best-per-book candidate during
+    # multi-book fusion). Not a correctness issue — the function is
+    # pure — but _score_result() does real per-call work (discourse-
+    # framing stripping, stop-word set algebra, per-word stemming), so
+    # paying it once per result is strictly cheaper for the identical
+    # outcome. Keyed by URL for the fusion lookup below — URLs are
+    # already the dedup identity for all_results (see seen_urls above),
+    # so they're guaranteed unique here.
+    scored_pairs = sorted(
+        ((_score_result(r, query, selected_books[0]), r) for r in all_results),
+        key=lambda pair: pair[0],
+        reverse=True,
+    )
+    score_by_url = {r["url"]: s for s, r in scored_pairs}
+    scored = [r for _, r in scored_pairs]
     top = scored[0]
-    top_score = _score_result(top, query, selected_books[0])
+    top_score = scored_pairs[0][0]
     _LOGGER.info(
         "Selected article '%s' from %s (score=%d)",
         top["title"], top["book"], top_score
@@ -919,7 +956,7 @@ def search(query: str) -> str:
 
         relevant_books = []
         for book, result in best_per_book.items():
-            score = _score_result(result, query, selected_books[0])
+            score = score_by_url[result["url"]]
             # Found via a deliberate config-completeness audit: this is
             # the actual, central "should a second book be fused in, or
             # dropped as noise" decision, documented in the README and

@@ -184,7 +184,7 @@ class TestGetToken:
         mock_resp = MagicMock()
         mock_resp.status_code = 200
         mock_resp.text = "SID=abc\nLSID=def\nAuth=mytoken123\n"
-        with patch("app.sources.freshrss.requests.post", return_value=mock_resp):
+        with patch("app.sources.freshrss._session.post", return_value=mock_resp):
             token = freshrss._get_token()
         assert token == "mytoken123"
         settings.freshrss_url = ""
@@ -212,7 +212,7 @@ class TestGetToken:
         mock_resp = MagicMock()
         mock_resp.status_code = 200
         mock_resp.text = "OK"
-        with patch("app.sources.freshrss.requests.post", return_value=mock_resp):
+        with patch("app.sources.freshrss._session.post", return_value=mock_resp):
             token = freshrss._get_token()
         assert token is None
         settings.freshrss_url = ""
@@ -228,7 +228,7 @@ class TestGetToken:
         settings.freshrss_api_password = "wrong"
         mock_resp = MagicMock()
         mock_resp.status_code = 401
-        with patch("app.sources.freshrss.requests.post", return_value=mock_resp):
+        with patch("app.sources.freshrss._session.post", return_value=mock_resp):
             token = freshrss._get_token()
         assert token is None
         settings.freshrss_url = ""
@@ -243,7 +243,7 @@ class TestGetToken:
         settings.freshrss_url = "http://freshrss"
         settings.freshrss_user = "admin"
         settings.freshrss_api_password = "password"
-        with patch("app.sources.freshrss.requests.post", side_effect=req.exceptions.ConnectionError()):
+        with patch("app.sources.freshrss._session.post", side_effect=req.exceptions.ConnectionError()):
             token = freshrss._get_token()
         assert token is None
         settings.freshrss_url = ""
@@ -260,7 +260,7 @@ class TestGetToken:
         mock_resp = MagicMock()
         mock_resp.status_code = 200
         mock_resp.text = "SID=abc\nLSID=def\n"  # no Auth= line
-        with patch("app.sources.freshrss.requests.post", return_value=mock_resp):
+        with patch("app.sources.freshrss._session.post", return_value=mock_resp):
             token = freshrss._get_token()
         assert token is None
         settings.freshrss_url = ""
@@ -281,7 +281,7 @@ class TestGetToken:
         mock_resp = MagicMock()
         mock_resp.status_code = 200
         mock_resp.text = "SID=abc\nLSID=def\nAuth=mytoken123\n"
-        with patch("app.sources.freshrss.requests.post", return_value=mock_resp) as mock_post:
+        with patch("app.sources.freshrss._session.post", return_value=mock_resp) as mock_post:
             first = freshrss._get_token()
             second = freshrss._get_token()
         assert first == second == "mytoken123"
@@ -301,7 +301,7 @@ class TestGetToken:
         mock_resp.status_code = 200
         mock_resp.text = "Auth=freshtoken456\n"
         freshrss._cached_token = "staletoken"
-        with patch("app.sources.freshrss.requests.post", return_value=mock_resp) as mock_post:
+        with patch("app.sources.freshrss._session.post", return_value=mock_resp) as mock_post:
             token = freshrss._get_token(force_refresh=True)
         assert token == "freshtoken456"
         assert mock_post.call_count == 1
@@ -322,7 +322,7 @@ class TestGetToken:
         mock_resp = MagicMock()
         mock_resp.status_code = 401
         freshrss._cached_token = "staletoken"
-        with patch("app.sources.freshrss.requests.post", return_value=mock_resp):
+        with patch("app.sources.freshrss._session.post", return_value=mock_resp):
             token = freshrss._get_token(force_refresh=True)
         assert token is None
         assert freshrss._cached_token is None
@@ -375,8 +375,8 @@ class TestSearchTokenRetry:
         }]}
 
         try:
-            with patch("app.sources.freshrss.requests.post", return_value=auth_resp) as mock_post, \
-                 patch("app.sources.freshrss.requests.get", side_effect=[stale_resp, fresh_resp]) as mock_get:
+            with patch("app.sources.freshrss._session.post", return_value=auth_resp) as mock_post, \
+                 patch("app.sources.freshrss._session.get", side_effect=[stale_resp, fresh_resp]) as mock_get:
                 result = freshrss.search("news")
             assert "Real headline" in result
             assert mock_get.call_count == 2   # stale attempt + one retry
@@ -400,8 +400,8 @@ class TestSearchTokenRetry:
         denied.status_code = 401
 
         try:
-            with patch("app.sources.freshrss.requests.post", return_value=auth_resp), \
-                 patch("app.sources.freshrss.requests.get", return_value=denied) as mock_get:
+            with patch("app.sources.freshrss._session.post", return_value=auth_resp), \
+                 patch("app.sources.freshrss._session.get", return_value=denied) as mock_get:
                 result = freshrss.search("news")
             # Exactly two article requests (original + single retry), then
             # an honest error — never a loop.
@@ -468,7 +468,7 @@ class TestSearch:
             "published": None, "canonical": [],
         }]
         with patch("app.sources.freshrss._get_token", return_value="tok"), \
-             patch("app.sources.freshrss.requests.get", return_value=self._mock_articles_response(items)):
+             patch("app.sources.freshrss._session.get", return_value=self._mock_articles_response(items)):
             result = freshrss.search("cats and dogs")
         assert "Cats & dogs are friends" in result
         assert "&amp;" not in result
@@ -491,7 +491,7 @@ class TestSearch:
             "published": None, "canonical": [],
         }]
         with patch("app.sources.freshrss._get_token", return_value="tok"), \
-             patch("app.sources.freshrss.requests.get", return_value=self._mock_articles_response(items)):
+             patch("app.sources.freshrss._session.get", return_value=self._mock_articles_response(items)):
             result = freshrss.search("test article")
         assert '">' not in result
         assert "After image text" in result
@@ -504,7 +504,7 @@ class TestSearch:
             {"title": "Article Two", "origin": {"title": "Source"}, "summary": {"content": "content two"}, "published": None, "canonical": []},
         ]
         with patch("app.sources.freshrss._get_token", return_value="tok"), \
-             patch("app.sources.freshrss.requests.get", return_value=self._mock_articles_response(items)):
+             patch("app.sources.freshrss._session.get", return_value=self._mock_articles_response(items)):
             result = freshrss.search("what's happening")
         assert "Article One" in result
         assert "Article Two" in result
@@ -513,7 +513,7 @@ class TestSearch:
         from app.sources import freshrss
         from unittest.mock import patch
         with patch("app.sources.freshrss._get_token", return_value="tok"), \
-             patch("app.sources.freshrss.requests.get", return_value=self._mock_articles_response([])):
+             patch("app.sources.freshrss._session.get", return_value=self._mock_articles_response([])):
             result = freshrss.search("news")
         assert "no recent articles" in result.lower()
 

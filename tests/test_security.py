@@ -114,7 +114,7 @@ class TestTokenLeakage:
         import requests as req
         settings.ha_url = "http://homeassistant:8123"
         settings.ha_token = "leak-test-token-abc123"
-        with patch("app.sources.home_assistant.requests.get",
+        with patch("app.sources.home_assistant._session.get",
                    side_effect=req.exceptions.ConnectionError("refused")):
             result = home_assistant.search("house status")
         assert "leak-test-token-abc123" not in result

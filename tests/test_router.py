@@ -2537,6 +2537,35 @@ class TestConditionalDetection:
         assert "weather" not in consequence.lower()
         assert "weather" in remainder.lower()
 
+    def test_proper_noun_pair_in_consequence_is_not_split(self):
+        """Regression test for a real gap found via a deliberate
+        function-by-function audit: _decompose() has always refused to
+        split at a conjunction joining a bare proper-noun pair ("Iran
+        and Israel"), but detect_conditional()'s remainder split never
+        applied the same guard — this exact query previously cleaved
+        "Israel" off as a supposedly separate intent and mangled the
+        consequence down to "tell me the latest on Iran"."""
+        result = self.detect(
+            "if the front door is unlocked, tell me the latest on Iran and Israel"
+        )
+        condition, consequence, remainder = result
+        assert condition == "the front door is unlocked"
+        assert consequence == "tell me the latest on Iran and Israel"
+        assert remainder == ""
+
+    def test_protected_pair_does_not_block_a_later_genuine_remainder(self):
+        """Mirrors _decompose()'s per-occurrence judgment: a protected
+        proper-noun pair EARLY in the consequence must not stop a
+        genuinely separate intent behind a LATER conjunction from being
+        split off as the remainder."""
+        result = self.detect(
+            "if the front door is unlocked, tell me the latest on Iran and Israel and also whats the weather"
+        )
+        condition, consequence, remainder = result
+        assert "Iran and Israel" in consequence
+        assert "weather" not in consequence.lower()
+        assert "weather" in remainder.lower()
+
     def test_plain_query_no_match(self):
         assert self.detect("what is the weather today") is None
 
@@ -4608,3 +4637,263 @@ class TestKiwixDisambiguationCandidatesSingleflight:
         from app.router import _singleflight
         assert _get_singleflight_fn() is _singleflight
 
+
+class TestRouteQuery:
+    """Tests for route_query() — the /search entry point that installs
+    the _ROUTE_STATS ContextVar channel around route_with_source() and
+    reports what genuinely happened (cached-ness, fallbacks, and the
+    intended source on failure) without changing route_with_source()'s
+    own recursion-laden 2-tuple signature. See the _ROUTE_STATS module
+    comment in app/router.py for the full design rationale."""
+
+    def setup_method(self):
+        from unittest.mock import patch
+        from app.router import clear_cache, clear_routing_cache
+        self._save_patch = patch("app.router._save_cache")
+        self._save_routing_patch = patch("app.router._save_routing_cache")
+        self._save_patch.start()
+        self._save_routing_patch.start()
+        clear_cache()
+        clear_routing_cache()
+
+    def teardown_method(self):
+        self._save_patch.stop()
+        self._save_routing_patch.stop()
+
+    def test_cold_explicit_source_reports_not_cached(self):
+        from unittest.mock import patch
+        from app.router import route_query
+        with patch("app.router.SOURCE_MAP", {"kiwix": lambda q: "Nitrogen is an element."}):
+            outcome = route_query("what is nitrogen", "kiwix")
+        assert outcome.success is True
+        assert outcome.cached is False
+        assert outcome.source_used == "kiwix"
+
+    def test_warm_explicit_source_reports_cached(self):
+        from unittest.mock import patch
+        from app.router import route_query, _set_cached
+        _set_cached("kiwix", "what is nitrogen", "Nitrogen is an element.")
+        with patch("app.router.SOURCE_MAP", {"kiwix": lambda q: "should never be called"}):
+            outcome = route_query("what is nitrogen", "kiwix")
+        assert outcome.success is True
+        assert outcome.cached is True
+        assert outcome.result == "Nitrogen is an element."
+
+    def test_fallback_is_recorded_where_it_happens(self):
+        """A kiwix result that looks empty falls back to web — the
+        outcome must report fallback_occurred=True and source_used=web,
+        recorded directly inside _resolve_single_source() rather than
+        inferred by any caller."""
+        from unittest.mock import patch
+        from app.router import route_query
+        source_map = {
+            "kiwix": lambda q: "No results found in wikipedia.",
+            "web": lambda q: "**Real web result**\nContent here.",
+        }
+        with patch("app.router.SOURCE_MAP", source_map):
+            outcome = route_query("some obscure query", "kiwix")
+        assert outcome.success is True
+        assert outcome.fallback_occurred is True
+        assert outcome.source_used == "web"
+
+    def test_fallback_inside_decomposed_sub_query_is_now_visible(self):
+        """The capability the old after-the-fact inference structurally
+        could not have: a fallback that fires inside ONE decomposed
+        sub-query, while the overall reported source is 'fusion'. The
+        old mechanism compared the full query's intent against the
+        resolved source and saw nothing; direct recording sees it."""
+        from unittest.mock import patch
+        from app.router import route_query
+
+        def fake_intent(q):
+            return "news" if "news" in q else "ha"
+
+        source_map = {
+            "news": lambda q: "No recent articles found in FreshRSS.",  # triggers fallback
+            "web": lambda q: "**Fallback web result**\nContent.",
+            "ha": lambda q: "**Lights:**\n- Kitchen: on",
+        }
+        with patch("app.router.SOURCE_MAP", source_map), \
+             patch("app.router.detect_intent", side_effect=fake_intent):
+            outcome = route_query("any new news today, and also lights status", "auto")
+        assert outcome.success is True
+        assert outcome.fallback_occurred is True
+        assert outcome.source_used == "fusion"  # two distinct sub-sources merged
+
+    def test_failure_reports_intended_source_not_auto(self):
+        from unittest.mock import patch
+        from app.router import route_query
+        with patch("app.router.detect_intent", return_value="forecast"), \
+             patch("app.router._resolve_single_source", side_effect=RuntimeError("boom")):
+            outcome = route_query("will it rain tomorrow", "auto")
+        assert outcome.success is False
+        assert outcome.error is not None and "boom" in outcome.error
+        assert outcome.source_used == "forecast"
+
+    def test_stats_channel_is_request_scoped_not_global(self):
+        """Two sequential route_query() calls must not leak stats into
+        each other — the first call's fallback must not make the second
+        call report one."""
+        from unittest.mock import patch
+        from app.router import route_query
+        falling_back = {
+            "kiwix": lambda q: "No results found in wikipedia.",
+            "web": lambda q: "**Web result**\nContent.",
+        }
+        clean = {"kiwix": lambda q: "# Nitrogen\nReal article."}
+        with patch("app.router.SOURCE_MAP", falling_back):
+            first = route_query("obscure thing", "kiwix")
+        with patch("app.router.SOURCE_MAP", clean):
+            second = route_query("what is nitrogen fresh", "kiwix")
+        assert first.fallback_occurred is True
+        assert second.fallback_occurred is False
+
+    def test_route_stat_is_a_noop_without_an_installed_channel(self):
+        """Callers that never go through route_query() — fusion's
+        internal dispatch, the MCP server's route(), adversarial
+        testing, every pre-existing test — must see zero behavior
+        change. _route_stat() with no installed dict must not raise."""
+        from app.router import _route_stat, _ROUTE_STATS
+        assert _ROUTE_STATS.get() is None
+        _route_stat("served_any_from_cache", True)  # must simply no-op
+        assert _ROUTE_STATS.get() is None
+
+class TestDecomposedSubQueriesRunConcurrently:
+    """Tests for the parallelized decomposition dispatch — decomposed
+    sub-queries are independent by construction and now resolve
+    concurrently on a fresh, per-call executor (see the dispatch-site
+    comment in route_with_source() for why per-call, not shared)."""
+
+    def setup_method(self):
+        from unittest.mock import patch
+        from app.router import clear_cache, clear_routing_cache
+        self._save_patch = patch("app.router._save_cache")
+        self._save_routing_patch = patch("app.router._save_routing_cache")
+        self._save_patch.start()
+        self._save_routing_patch.start()
+        clear_cache()
+        clear_routing_cache()
+
+    def teardown_method(self):
+        self._save_patch.stop()
+        self._save_routing_patch.stop()
+
+    def test_two_slow_sub_queries_overlap_in_time(self):
+        """Two sub-queries whose handlers each take ~0.3s must complete
+        in well under the ~0.6s a sequential walk would need. The
+        margin (0.55s) is generous enough to be robust against CI
+        scheduling jitter while still cleanly distinguishing the two
+        behaviors — confirmed the sequential implementation fails this
+        at ~0.6s+."""
+        import time
+        from unittest.mock import patch
+        from app.router import route_with_source
+
+        def slow_forecast(q):
+            time.sleep(0.3)
+            return "Today will be clear."
+
+        def slow_ha(q):
+            time.sleep(0.3)
+            return "**Lights:**\n- Kitchen: on"
+
+        def fake_intent(q):
+            return "forecast" if "weather" in q else "ha"
+
+        source_map = {"forecast": slow_forecast, "ha": slow_ha}
+        with patch("app.router.SOURCE_MAP", source_map), \
+             patch("app.router.detect_intent", side_effect=fake_intent):
+            start = time.monotonic()
+            result, source = route_with_source(
+                "what is the weather today and also lights status", "auto"
+            )
+            elapsed = time.monotonic() - start
+
+        assert elapsed < 0.55, f"sub-queries did not overlap: {elapsed:.2f}s"
+        assert "clear" in result
+        assert "Kitchen" in result
+        assert source == "fusion"
+
+    def test_section_order_matches_ask_order_not_completion_order(self):
+        """The FIRST-asked sub-query is deliberately the SLOW one, so
+        completion order is the reverse of ask order — the merged
+        response's sections must still follow ask order, since futures
+        are collected in submission order, never as_completed()."""
+        import time
+        from unittest.mock import patch
+        from app.router import route_with_source
+
+        def slow_forecast(q):
+            time.sleep(0.25)
+            return "Today will be clear."
+
+        def fast_ha(q):
+            return "**Lights:**\n- Kitchen: on"
+
+        def fake_intent(q):
+            return "forecast" if "weather" in q else "ha"
+
+        source_map = {"forecast": slow_forecast, "ha": fast_ha}
+        with patch("app.router.SOURCE_MAP", source_map), \
+             patch("app.router.detect_intent", side_effect=fake_intent):
+            result, _ = route_with_source(
+                "what is the weather today and also lights status", "auto"
+            )
+
+        assert result.index("clear") < result.index("Kitchen"), (
+            "sections came back in completion order, not ask order"
+        )
+
+    def test_sub_query_exception_still_propagates(self):
+        """An exception inside one sub-query's worker must propagate to
+        the caller exactly as it did under the sequential loop — never
+        swallowed by the executor indirection."""
+        import pytest
+        from unittest.mock import patch
+        from app.router import route_with_source
+
+        def exploding_handler(q):
+            raise RuntimeError("sub-query boom")
+
+        def fake_intent(q):
+            return "forecast" if "weather" in q else "ha"
+
+        source_map = {
+            "forecast": exploding_handler,
+            "ha": lambda q: "**Lights:**\n- Kitchen: on",
+        }
+        with patch("app.router.SOURCE_MAP", source_map), \
+             patch("app.router.detect_intent", side_effect=fake_intent):
+            with pytest.raises(RuntimeError, match="sub-query boom"):
+                route_with_source("what is the weather today and also lights status", "auto")
+
+    def test_suppress_cache_writes_propagates_into_sub_query_workers(self):
+        """suppress_cache_writes() is a ContextVar; a bare
+        executor.submit() would silently drop it inside worker threads
+        (the exact bug found and fixed at every other executor site in
+        this project). Confirms the copy_context()-per-task dispatch
+        genuinely carries the suppression flag into decomposed
+        sub-query workers: a compound synthetic query resolved under
+        suppression must leave the result cache completely empty."""
+        from unittest.mock import patch
+        from app.router import (
+            route_with_source, suppress_cache_writes, _cache,
+        )
+
+        def fake_intent(q):
+            return "forecast" if "weather" in q else "ha"
+
+        source_map = {
+            "forecast": lambda q: "Today will be clear.",
+            "ha": lambda q: "**Lights:**\n- Kitchen: on",
+        }
+        with patch("app.router.SOURCE_MAP", source_map), \
+             patch("app.router.detect_intent", side_effect=fake_intent):
+            with suppress_cache_writes():
+                route_with_source(
+                    "what is the weather today and also lights status", "auto"
+                )
+
+        assert len(_cache) == 0, (
+            f"synthetic sub-query results leaked into the result cache: {list(_cache)}"
+        )

@@ -7,6 +7,15 @@ from app.scoring import filter_and_rank
 
 _LOGGER = logging.getLogger(__name__)
 
+# Persistent HTTP session — connection reuse across every FreshRSS call,
+# the same shape as app/llm.py's fix and searxng.py's _session (see
+# searxng.py's comment for the shared thread-safety rationale: never
+# mutated after creation, only ever `.get()`/`.post()`). Pairs with the
+# _cached_token below: together a warm news query now costs exactly one
+# HTTP request on an already-open connection, where it previously cost
+# two fresh TCP connections (ClientLogin + articles) every single time.
+_session = requests.Session()
+
 # Words that indicate a general "give me everything" news request
 # — skip filtering for these so Jarvis gets a full feed summary
 _GENERAL_QUERIES = {
@@ -126,7 +135,7 @@ def _get_token(force_refresh: bool = False) -> str | None:
     if _cached_token and not force_refresh:
         return _cached_token
     try:
-        resp = requests.post(
+        resp = _session.post(
             f"{settings.freshrss_url}/api/greader.php/accounts/ClientLogin",
             data={"Email": settings.freshrss_user, "Passwd": settings.freshrss_api_password},
             timeout=5,
@@ -155,7 +164,7 @@ def search(query: str) -> str:
     if not token:
         return "Error: Could not authenticate with FreshRSS. Check credentials."
     try:
-        resp = requests.get(
+        resp = _session.get(
             f"{settings.freshrss_url}/api/greader.php/reader/api/0/stream/contents/reading-list",
             headers={"Authorization": f"GoogleLogin auth={token}"},
             params={"n": settings.freshrss_max_articles, "output": "json"},
@@ -171,7 +180,7 @@ def search(query: str) -> str:
             token = _get_token(force_refresh=True)
             if not token:
                 return "Error: Could not authenticate with FreshRSS. Check credentials."
-            resp = requests.get(
+            resp = _session.get(
                 f"{settings.freshrss_url}/api/greader.php/reader/api/0/stream/contents/reading-list",
                 headers={"Authorization": f"GoogleLogin auth={token}"},
                 params={"n": settings.freshrss_max_articles, "output": "json"},

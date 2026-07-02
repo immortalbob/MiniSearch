@@ -5,7 +5,7 @@ import os
 import sqlite3
 import time
 import requests
-from contextlib import asynccontextmanager, AsyncExitStack
+from contextlib import asynccontextmanager, AsyncExitStack, closing
 from typing import Optional
 
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -16,11 +16,9 @@ from starlette.routing import Mount
 from pydantic import BaseModel
 
 from app.router import (
-    route_with_source,
+    route_query,
     SOURCE_MAP,
     FALLBACK_CHAIN,
-    detect_intent,
-    check_cached,
     get_cache_stats,
     get_cache_count,
     clear_cache,
@@ -154,30 +152,29 @@ def _init_log_db():
     caught exception on the ALTER).
     """
     try:
-        con = _connect(_LOG_DB)
-        con.execute("""
-            CREATE TABLE IF NOT EXISTS query_log (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                timestamp TEXT NOT NULL,
-                query TEXT NOT NULL,
-                source_requested TEXT NOT NULL,
-                source_used TEXT NOT NULL,
-                cached INTEGER NOT NULL,
-                success INTEGER NOT NULL,
-                latency_ms INTEGER NOT NULL,
-                fallback_occurred INTEGER NOT NULL DEFAULT 0
-            )
-        """)
-        # Migration for tables created before fallback_occurred existed —
-        # ALTER TABLE ADD COLUMN fails harmlessly if the column is already
-        # present (fresh installs created with the CREATE TABLE above
-        # already have it), so this is safe to run unconditionally
-        try:
-            con.execute("ALTER TABLE query_log ADD COLUMN fallback_occurred INTEGER NOT NULL DEFAULT 0")
-        except Exception:
-            pass  # column already exists
-        con.commit()
-        con.close()
+        with closing(_connect(_LOG_DB)) as con:
+            con.execute("""
+                CREATE TABLE IF NOT EXISTS query_log (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp TEXT NOT NULL,
+                    query TEXT NOT NULL,
+                    source_requested TEXT NOT NULL,
+                    source_used TEXT NOT NULL,
+                    cached INTEGER NOT NULL,
+                    success INTEGER NOT NULL,
+                    latency_ms INTEGER NOT NULL,
+                    fallback_occurred INTEGER NOT NULL DEFAULT 0
+                )
+            """)
+            # Migration for tables created before fallback_occurred existed —
+            # ALTER TABLE ADD COLUMN fails harmlessly if the column is already
+            # present (fresh installs created with the CREATE TABLE above
+            # already have it), so this is safe to run unconditionally
+            try:
+                con.execute("ALTER TABLE query_log ADD COLUMN fallback_occurred INTEGER NOT NULL DEFAULT 0")
+            except Exception:
+                pass  # column already exists
+            con.commit()
     except Exception as e:
         _LOGGER.warning("Could not initialize query log db: %s", e)
 
@@ -185,13 +182,12 @@ def _init_log_db():
 def _log_query(query: str, source_requested: str, source_used: str, cached: bool, success: bool, latency_ms: int, fallback_occurred: bool = False):
     """Write a query log entry."""
     try:
-        con = _connect(_LOG_DB)
-        con.execute(
-            "INSERT INTO query_log (timestamp, query, source_requested, source_used, cached, success, latency_ms, fallback_occurred) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), query, source_requested, source_used, int(cached), int(success), latency_ms, int(fallback_occurred))
-        )
-        con.commit()
-        con.close()
+        with closing(_connect(_LOG_DB)) as con:
+            con.execute(
+                "INSERT INTO query_log (timestamp, query, source_requested, source_used, cached, success, latency_ms, fallback_occurred) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), query, source_requested, source_used, int(cached), int(success), latency_ms, int(fallback_occurred))
+            )
+            con.commit()
     except Exception as e:
         _LOGGER.warning("Could not write query log: %s", e)
 
@@ -335,7 +331,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Mnemolis",
     description="Unified local knowledge search API with multi-source fusion. Routes queries to Kiwix, Open-Meteo, FreshRSS, SearXNG, Uptime Kuma, or multiple sources concurrently.",
-    version="3.51.1",
+    version="3.52.0",
     lifespan=lifespan,
 )
 
@@ -566,82 +562,43 @@ def routing_cache_clear():
 
 @app.post("/search", response_model=SearchResponse, dependencies=[Depends(require_api_key)])
 def search(request: SearchRequest):
-    intent = None
-    if request.source == "auto":
-        intent = detect_intent(request.query)
-        if isinstance(intent, list):
-            was_cached = check_cached("fusion", f"fusion[{','.join(sorted(intent))}]:{request.query}")
-        else:
-            was_cached = check_cached(intent, request.query)
-    else:
-        was_cached = check_cached(request.source, request.query)
-
+    # route_query() returns everything this endpoint previously
+    # reconstructed around route_with_source() — the ACTUAL source that
+    # produced the result (fallbacks included), whether the response was
+    # served entirely from cache, and whether any FALLBACK_CHAIN fallback
+    # genuinely fired. Found via a deliberate function-by-function audit:
+    # this endpoint previously called detect_intent(request.query) BEFORE
+    # routing, purely to compute the `cached` flag — meaning a query that
+    # route_with_source() decomposes or treats as conditional paid a
+    # full, wasted cold LLM routing call for a full-query intent decision
+    # those paths never use, and the `cached` flag was computed against a
+    # single-source cache key that doesn't correspond to anything those
+    # paths actually do. Fallback detection was likewise inferred after
+    # the fact by comparing pre-computed intent against the resolved
+    # source — an inference (its own former comment here said so) that
+    # was structurally blind to fallbacks inside decomposed sub-queries.
+    # route_query() records all three facts at the exact code points
+    # where they genuinely happen instead — see its docstring and the
+    # _ROUTE_STATS comment in app/router.py for the mechanism and why
+    # route_with_source()'s own signature deliberately stays unchanged.
     start = time.monotonic()
-    try:
-        # route_with_source returns the ACTUAL source that produced the
-        # result, not just the originally-intended one — a query routed
-        # to 'kiwix' that returns nothing usable can silently fall back to
-        # 'web' internally, and source_used must reflect that real outcome
-        # rather than echoing back whatever intent detection guessed
-        # before route() ran. Found via real usage where a GPIO
-        # troubleshooting query's response claimed source_used="kiwix"
-        # while the actual content was a web search result.
-        result, resolved_source = route_with_source(request.query, request.source, request.fusion_sources)
-        latency_ms = int((time.monotonic() - start) * 1000)
+    outcome = route_query(request.query, request.source, request.fusion_sources)
+    latency_ms = int((time.monotonic() - start) * 1000)
 
-        # Detect fallback occurrence without changing route_with_source()'s
-        # return signature at all — that function already recurses into
-        # itself at 4 internal call sites (conditional detection, remainder
-        # handling), so widening its return tuple would touch every one of
-        # those, a much larger and riskier change than this comparison.
-        # 'intent' (or request.source for explicit requests) is what was
-        # decided BEFORE route_with_source ran; comparing it against
-        # FALLBACK_CHAIN's known mapping for resolved_source tells us
-        # whether a fallback actually happened, using only data that
-        # already existed at this call site.
-        intended_source = intent if intent is not None else request.source
-        fallback_occurred = (
-            not isinstance(intended_source, list)
-            and intended_source in FALLBACK_CHAIN
-            and resolved_source == FALLBACK_CHAIN[intended_source]
-        )
-
-        _log_query(request.query, request.source, resolved_source, was_cached, True, latency_ms, fallback_occurred)
-        return SearchResponse(
-            query=request.query,
-            source_used=resolved_source,
-            result=result,
-            success=True,
-            cached=was_cached,
-        )
-    except Exception as e:
-        latency_ms = int((time.monotonic() - start) * 1000)
-        # Found via a deliberate "bulletproofing" pass: this used to
-        # report source_used=request.source on failure, which is just
-        # the literal string "auto" whenever auto-routing was requested
-        # — not a real source name, and meaningfully less informative
-        # than what was already known. `intent` (computed above, before
-        # the try block, specifically to build the cache-check key) is
-        # the actual source this query was about to be routed to before
-        # the exception occurred — reporting it instead gives a real,
-        # genuinely useful answer to "what was this query trying to
-        # do" rather than echoing back a non-answer.
-        if intent is None:
-            failure_source = request.source
-        elif isinstance(intent, list):
-            failure_source = "fusion"
-        else:
-            failure_source = intent
-        _log_query(request.query, request.source, failure_source, was_cached, False, latency_ms)
-        _LOGGER.error("Search failed for query '%s': %s", request.query, e)
-        return SearchResponse(
-            query=request.query,
-            source_used=failure_source,
-            result="",
-            success=False,
-            cached=False,
-            error=str(e),
-        )
+    _log_query(
+        request.query, request.source, outcome.source_used,
+        outcome.cached, outcome.success, latency_ms, outcome.fallback_occurred,
+    )
+    if not outcome.success:
+        _LOGGER.error("Search failed for query '%s': %s", request.query, outcome.error)
+    return SearchResponse(
+        query=request.query,
+        source_used=outcome.source_used,
+        result=outcome.result,
+        success=outcome.success,
+        cached=outcome.cached,
+        error=outcome.error,
+    )
 
 
 @app.get("/logs")
@@ -660,12 +617,11 @@ def query_logs(limit: int = 50):
     # but a real correctness gap worth a cheap, simple bound regardless.
     limit = max(1, min(limit, 1000))
     try:
-        con = _connect(_LOG_DB)
-        rows = con.execute(
-            "SELECT timestamp, query, source_requested, source_used, cached, success, latency_ms FROM query_log ORDER BY id DESC LIMIT ?",
-            (limit,)
-        ).fetchall()
-        con.close()
+        with closing(_connect(_LOG_DB)) as con:
+            rows = con.execute(
+                "SELECT timestamp, query, source_requested, source_used, cached, success, latency_ms FROM query_log ORDER BY id DESC LIMIT ?",
+                (limit,)
+            ).fetchall()
         entries = [
             {
                 "timestamp": r[0],
@@ -687,11 +643,10 @@ def query_logs(limit: int = 50):
 def logs_clear():
     """Clear all query log entries."""
     try:
-        con = _connect(_LOG_DB)
-        cur = con.execute("DELETE FROM query_log")
-        count = cur.rowcount
-        con.commit()
-        con.close()
+        with closing(_connect(_LOG_DB)) as con:
+            cur = con.execute("DELETE FROM query_log")
+            count = cur.rowcount
+            con.commit()
         return {"status": "cleared", "entries_removed": count}
     except Exception as e:
         return {"status": "error", "error": str(e)}
@@ -1071,13 +1026,17 @@ def query_log_stats():
     Returns:
     - Total queries, cache hit rate, success rate
     - Fallback count and rate — how often a result was empty enough to
-      trigger FALLBACK_CHAIN (e.g. kiwix -> web). Detected via a single
-      boolean column (fallback_occurred) computed by comparing the
-      pre-route intended source against the actual resolved source,
-      rather than changing route_with_source()'s return signature —
-      that function already recurses into itself at 4 internal call
-      sites, so widening its return tuple would be much more invasive
-      than this comparison needed to be.
+      trigger FALLBACK_CHAIN (e.g. kiwix -> web). Recorded directly at
+      the one code point where a fallback genuinely happens
+      (router._resolve_single_source(), via the route_query() stats
+      channel) rather than inferred after the fact by comparing a
+      pre-computed intent against the resolved source — the old
+      inference was structurally blind to fallbacks inside decomposed
+      sub-queries, which are now counted too. For a decomposed query
+      whose sub-query fell back, the row's source_used is the overall
+      label ("fusion"), so such rows count toward the total
+      fallback_count but not toward the per-target breakdown below,
+      which matches rows by source_used.
     - Fallback breakdown by TARGET, not original source — when multiple
       sources share the same fallback target (kiwix and news both fall
       back to web), the boolean alone can't distinguish which one
@@ -1090,6 +1049,7 @@ def query_log_stats():
     - Queries per source breakdown
     - Repeated queries with cache hit rate
     """
+    con = None
     try:
         con = _connect(_LOG_DB)
 
@@ -1255,8 +1215,6 @@ def query_log_stats():
             SELECT COUNT(DISTINCT LOWER(TRIM(query))) FROM query_log
         """).fetchone()[0] or 0
 
-        con.close()
-
         return {
             "total_queries": total,
             "unique_queries": unique,
@@ -1274,3 +1232,14 @@ def query_log_stats():
 
     except Exception as e:
         return {"error": str(e)}
+    finally:
+        # Guaranteed close even when one of the queries above raises —
+        # the previous inline con.close() on the success path leaked the
+        # connection on any mid-function sqlite error (the except above
+        # caught the error and returned, but the connection stayed open
+        # until GC). Same fix applied across every _connect() call site
+        # in this pass; the short ones use contextlib.closing, this one
+        # uses try/finally because its body is too long to re-indent
+        # under a with block without obscuring the diff.
+        if con is not None:
+            con.close()

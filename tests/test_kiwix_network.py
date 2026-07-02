@@ -42,13 +42,13 @@ class TestFetchCatalogPage:
 
     def test_parses_valid_opds_entries(self):
         from app.sources.kiwix import _fetch_catalog_page
-        with patch("app.sources.kiwix.requests.get", return_value=self._mock_xml_response(SAMPLE_OPDS_XML)):
+        with patch("app.sources.kiwix._session.get", return_value=self._mock_xml_response(SAMPLE_OPDS_XML)):
             books = _fetch_catalog_page("http://kiwix:8080/catalog/v2/entries")
         assert len(books) == 2
 
     def test_extracts_book_name_from_href(self):
         from app.sources.kiwix import _fetch_catalog_page
-        with patch("app.sources.kiwix.requests.get", return_value=self._mock_xml_response(SAMPLE_OPDS_XML)):
+        with patch("app.sources.kiwix._session.get", return_value=self._mock_xml_response(SAMPLE_OPDS_XML)):
             books = _fetch_catalog_page("http://kiwix:8080/catalog/v2/entries")
         names = [b["name"] for b in books]
         assert "wikipedia_en_all_maxi_2026-02" in names
@@ -56,7 +56,7 @@ class TestFetchCatalogPage:
 
     def test_extracts_title_and_summary(self):
         from app.sources.kiwix import _fetch_catalog_page
-        with patch("app.sources.kiwix.requests.get", return_value=self._mock_xml_response(SAMPLE_OPDS_XML)):
+        with patch("app.sources.kiwix._session.get", return_value=self._mock_xml_response(SAMPLE_OPDS_XML)):
             books = _fetch_catalog_page("http://kiwix:8080/catalog/v2/entries")
         wiki = next(b for b in books if "wikipedia" in b["name"])
         assert wiki["title"] == "Wikipedia"
@@ -64,19 +64,19 @@ class TestFetchCatalogPage:
 
     def test_empty_feed_returns_empty_list(self):
         from app.sources.kiwix import _fetch_catalog_page
-        with patch("app.sources.kiwix.requests.get", return_value=self._mock_xml_response(EMPTY_OPDS_XML)):
+        with patch("app.sources.kiwix._session.get", return_value=self._mock_xml_response(EMPTY_OPDS_XML)):
             books = _fetch_catalog_page("http://kiwix:8080/catalog/v2/entries")
         assert books == []
 
     def test_returns_empty_on_connection_error(self):
         from app.sources.kiwix import _fetch_catalog_page
-        with patch("app.sources.kiwix.requests.get", side_effect=req.exceptions.ConnectionError()):
+        with patch("app.sources.kiwix._session.get", side_effect=req.exceptions.ConnectionError()):
             books = _fetch_catalog_page("http://kiwix:8080/catalog/v2/entries")
         assert books == []
 
     def test_returns_empty_on_malformed_xml(self):
         from app.sources.kiwix import _fetch_catalog_page
-        with patch("app.sources.kiwix.requests.get", return_value=self._mock_xml_response("not xml at all <<<")):
+        with patch("app.sources.kiwix._session.get", return_value=self._mock_xml_response("not xml at all <<<")):
             books = _fetch_catalog_page("http://kiwix:8080/catalog/v2/entries")
         assert books == []
 
@@ -86,7 +86,7 @@ class TestFetchCatalogPage:
 <feed xmlns="http://www.w3.org/2005/Atom">
   <entry><title>No Link Book</title></entry>
 </feed>"""
-        with patch("app.sources.kiwix.requests.get", return_value=self._mock_xml_response(xml)):
+        with patch("app.sources.kiwix._session.get", return_value=self._mock_xml_response(xml)):
             books = _fetch_catalog_page("http://kiwix:8080/catalog/v2/entries")
         assert books == []
 
@@ -1123,7 +1123,7 @@ class TestSearchBook:
           <li><a href="/viewer#wikipedia/A/Nitrogen">Nitrogen</a><cite>chemical element</cite></li>
         </div>
         """
-        with patch("app.sources.kiwix.requests.get", return_value=self._mock_html_response(html)):
+        with patch("app.sources.kiwix._session.get", return_value=self._mock_html_response(html)):
             results = _search_book("nitrogen", "wikipedia_en_all_maxi_2026-02")
         assert len(results) == 1
         assert results[0]["title"] == "Nitrogen"
@@ -1131,7 +1131,7 @@ class TestSearchBook:
 
     def test_no_results_div_returns_empty(self):
         from app.sources.kiwix import _search_book
-        with patch("app.sources.kiwix.requests.get", return_value=self._mock_html_response("<html><body>nothing</body></html>")):
+        with patch("app.sources.kiwix._session.get", return_value=self._mock_html_response("<html><body>nothing</body></html>")):
             results = _search_book("test", "wikipedia_en_all_maxi_2026-02")
         assert results == []
 
@@ -1143,7 +1143,7 @@ class TestSearchBook:
           <li><a href="/viewer#se/A/Real-Question">Real Question</a><cite>excerpt</cite></li>
         </div>
         """
-        with patch("app.sources.kiwix.requests.get", return_value=self._mock_html_response(html)):
+        with patch("app.sources.kiwix._session.get", return_value=self._mock_html_response(html)):
             results = _search_book("python", "stackoverflow")
         assert len(results) == 1
         assert results[0]["title"] == "Real Question"
@@ -1155,13 +1155,13 @@ class TestSearchBook:
           <li><a href="/viewer#wikipedia/A/Test">Test</a></li>
         </div>
         """
-        with patch("app.sources.kiwix.requests.get", return_value=self._mock_html_response(html)):
+        with patch("app.sources.kiwix._session.get", return_value=self._mock_html_response(html)):
             results = _search_book("test", "wikipedia_en_all_maxi_2026-02")
         assert results[0]["excerpt"] == ""
 
     def test_returns_empty_on_connection_error(self):
         from app.sources.kiwix import _search_book
-        with patch("app.sources.kiwix.requests.get", side_effect=req.exceptions.ConnectionError()):
+        with patch("app.sources.kiwix._session.get", side_effect=req.exceptions.ConnectionError()):
             results = _search_book("test", "wikipedia_en_all_maxi_2026-02")
         assert results == []
 
@@ -1170,7 +1170,7 @@ class TestSearchBook:
         from app.config import settings
         from unittest.mock import patch
         html = '<div class="results"><li><a href="/viewer#wikipedia/A/Test">Test</a></li></div>'
-        with patch("app.sources.kiwix.requests.get", return_value=self._mock_html_response(html)) as mock_get:
+        with patch("app.sources.kiwix._session.get", return_value=self._mock_html_response(html)) as mock_get:
             _search_book("test", "wikipedia_en_all_maxi_2026-02")
         params = mock_get.call_args.kwargs["params"]
         assert params["limit"] == settings.kiwix_search_limit
@@ -1179,7 +1179,7 @@ class TestSearchBook:
         from app.sources.kiwix import _search_book
         from unittest.mock import patch
         html = '<div class="results"><li><a href="/viewer#wikipedia/A/Test">Test</a></li></div>'
-        with patch("app.sources.kiwix.requests.get", return_value=self._mock_html_response(html)) as mock_get:
+        with patch("app.sources.kiwix._session.get", return_value=self._mock_html_response(html)) as mock_get:
             _search_book("test", "wikipedia_en_all_maxi_2026-02", limit=3)
         params = mock_get.call_args.kwargs["params"]
         assert params["limit"] == 3
@@ -1191,7 +1191,7 @@ class TestSearchBook:
           <li><a href="/viewer#wikipedia/A/Test">Test</a><cite>excerpt</cite></li>
         </div>
         """
-        with patch("app.sources.kiwix.requests.get", return_value=self._mock_html_response(html)):
+        with patch("app.sources.kiwix._session.get", return_value=self._mock_html_response(html)):
             results = _search_book("test", "wikipedia_en_all_maxi_2026-02")
         assert results[0]["book"] == "wikipedia_en_all_maxi_2026-02"
 
@@ -1209,14 +1209,14 @@ class TestFetchArticle:
     def test_extracts_wikipedia_style_content(self):
         from app.sources.kiwix import _fetch_article
         html = '<html><body><div class="mw-parser-output">Nitrogen is a chemical element.</div></body></html>'
-        with patch("app.sources.kiwix.requests.get", return_value=self._mock_html_response(html)):
+        with patch("app.sources.kiwix._session.get", return_value=self._mock_html_response(html)):
             result = _fetch_article("http://kiwix:8080/viewer#wikipedia/A/Nitrogen")
         assert "Nitrogen is a chemical element" in result
 
     def test_falls_back_to_body_when_no_known_selector(self):
         from app.sources.kiwix import _fetch_article
         html = "<html><body>Just plain body content here.</body></html>"
-        with patch("app.sources.kiwix.requests.get", return_value=self._mock_html_response(html)):
+        with patch("app.sources.kiwix._session.get", return_value=self._mock_html_response(html)):
             result = _fetch_article("http://kiwix:8080/viewer#test")
         assert "Just plain body content" in result
 
@@ -1227,7 +1227,7 @@ class TestFetchArticle:
             <style>.x { color: red; }</style>
             Real content here.
         </div></body></html>'''
-        with patch("app.sources.kiwix.requests.get", return_value=self._mock_html_response(html)):
+        with patch("app.sources.kiwix._session.get", return_value=self._mock_html_response(html)):
             result = _fetch_article("http://kiwix:8080/viewer#test")
         assert "alert" not in result
         assert "color: red" not in result
@@ -1247,7 +1247,7 @@ class TestFetchArticle:
             <div id="toc">Another TOC variant</div>
             Real article content that matters.
         </div></body></html>'''
-        with patch("app.sources.kiwix.requests.get", return_value=self._mock_html_response(html)):
+        with patch("app.sources.kiwix._session.get", return_value=self._mock_html_response(html)):
             result = _fetch_article("http://kiwix:8080/viewer#test")
         assert "Contents" not in result
         assert "Another TOC variant" not in result
@@ -1262,7 +1262,7 @@ class TestFetchArticle:
             <table class="infobox"><tr><td>Infobox content</td></tr></table>
             Real article content.
         </div></body></html>'''
-        with patch("app.sources.kiwix.requests.get", return_value=self._mock_html_response(html)):
+        with patch("app.sources.kiwix._session.get", return_value=self._mock_html_response(html)):
             result = _fetch_article("http://kiwix:8080/viewer#test")
         assert "Infobox content" not in result
         assert "Real article content" in result
@@ -1271,33 +1271,33 @@ class TestFetchArticle:
         from app.sources.kiwix import _fetch_article
         long_text = "x" * 5000
         html = f'<html><body><div class="mw-parser-output">{long_text}</div></body></html>'
-        with patch("app.sources.kiwix.requests.get", return_value=self._mock_html_response(html)):
+        with patch("app.sources.kiwix._session.get", return_value=self._mock_html_response(html)):
             result = _fetch_article("http://kiwix:8080/viewer#test", max_chars=100)
         assert len(result) <= 100
 
     def test_collapses_excess_newlines(self):
         from app.sources.kiwix import _fetch_article
         html = '<html><body><div class="mw-parser-output">Line1\n\n\n\n\nLine2</div></body></html>'
-        with patch("app.sources.kiwix.requests.get", return_value=self._mock_html_response(html)):
+        with patch("app.sources.kiwix._session.get", return_value=self._mock_html_response(html)):
             result = _fetch_article("http://kiwix:8080/viewer#test")
         assert "\n\n\n" not in result
 
     def test_no_content_found_returns_empty(self):
         from app.sources.kiwix import _fetch_article
-        with patch("app.sources.kiwix.requests.get", return_value=self._mock_html_response("")):
+        with patch("app.sources.kiwix._session.get", return_value=self._mock_html_response("")):
             result = _fetch_article("http://kiwix:8080/viewer#test")
         assert result == ""
 
     def test_returns_empty_on_connection_error(self):
         from app.sources.kiwix import _fetch_article
-        with patch("app.sources.kiwix.requests.get", side_effect=req.exceptions.ConnectionError()):
+        with patch("app.sources.kiwix._session.get", side_effect=req.exceptions.ConnectionError()):
             result = _fetch_article("http://kiwix:8080/viewer#test")
         assert result == ""
 
     def test_stack_exchange_style_question_div(self):
         from app.sources.kiwix import _fetch_article
         html = '<html><body><div id="question">How do I do X?</div></body></html>'
-        with patch("app.sources.kiwix.requests.get", return_value=self._mock_html_response(html)):
+        with patch("app.sources.kiwix._session.get", return_value=self._mock_html_response(html)):
             result = _fetch_article("http://kiwix:8080/viewer#se/test")
         assert "How do I do X?" in result
 

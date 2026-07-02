@@ -201,8 +201,18 @@ def search(query: str) -> str:
         _LOGGER.error("Failed to connect to Uptime Kuma: %s", e)
         # Force a fresh connection attempt next call — whatever state
         # the current one is in after an exception here is assumed bad.
-        with _connection_lock:
-            _persistent_api = None
+        # Uses disconnect() (which closes the underlying Socket.IO
+        # transport before dropping the reference) rather than bare
+        # `_persistent_api = None` — found via a deliberate function-by-
+        # function audit: the bare assignment orphaned a possibly
+        # half-alive connection object (e.g. a login timeout whose
+        # socket had actually connected fine), leaving its transport
+        # open until garbage collection rather than closing it at the
+        # one moment we know it's being discarded. get_connection()'s
+        # own reconnect path already disconnects a stale object before
+        # replacing it for exactly this reason; this error path was the
+        # one discard site that didn't.
+        disconnect()
         return f"Could not connect to Uptime Kuma: {e}"
 
     if not monitors:
