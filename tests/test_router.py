@@ -1865,11 +1865,11 @@ class TestRoutingCacheEviction:
     own entry), making unbounded growth over sustained real-world usage a
     real concern, not just a theoretical one.
 
-    _save_routing_cache() (real disk I/O) is mocked throughout — it fires
-    on every single _set_routing() call with no batching, unlike the
-    result cache's batched save, so filling the cache to its max size in
-    a test would otherwise mean hundreds or thousands of real disk writes
-    to test logic that has nothing to do with disk I/O at all.
+    _save_routing_cache() (real disk I/O) is mocked throughout — filling
+    the cache to its max size in a test would otherwise mean many real
+    disk writes (one per _ROUTING_CACHE_SAVE_INTERVAL writes, now that
+    routing saves are batched the same way the result cache's always
+    were) to test logic that has nothing to do with disk I/O at all.
     """
 
     def setup_method(self):

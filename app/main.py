@@ -26,6 +26,7 @@ from app.router import (
     clear_cache,
     load_cache,
     load_routing_cache,
+    flush_caches,
     get_routing_cache_stats,
     clear_routing_cache,
 )
@@ -322,6 +323,13 @@ async def lifespan(app: FastAPI):
 
         scheduler.shutdown()
         _LOGGER.info("Snapshot scheduler stopped")
+        # Both caches batch their disk writes (every N entries), so up
+        # to N-1 recent entries live only in memory at any moment — fine
+        # for a hard crash, but a clean shutdown shouldn't discard them
+        # when one final write preserves everything. See
+        # router.flush_caches()'s own docstring.
+        flush_caches()
+        _LOGGER.info("Caches flushed to disk")
 
 
 app = FastAPI(
@@ -700,6 +708,7 @@ def backup():
     """
     import tarfile
     import tempfile
+    import shutil
 
     data_files = _BACKUP_DATA_FILES
 
@@ -708,12 +717,59 @@ def backup():
         tmp_path = tmp.name
         tmp.close()
 
-        with tarfile.open(tmp_path, "w:gz") as tar:
-            included = []
-            for f in data_files:
-                if os.path.exists(f):
-                    tar.add(f, arcname=os.path.basename(f))
-                    included.append(os.path.basename(f))
+        # Every Mnemolis SQLite database runs in WAL mode (see
+        # _connect()), which means the main .db file on disk is NOT the
+        # complete database at an arbitrary moment — recent committed
+        # writes live in the -wal sidecar file until the next
+        # checkpoint. Found via a deliberate function-by-function audit:
+        # tar.add()-ing the bare .db file directly (the previous
+        # behavior) silently produced backups missing every
+        # not-yet-checkpointed write, and — if a writer was mid-commit
+        # at the exact moment of the copy — potentially an internally
+        # inconsistent file. SQLite's own online backup API
+        # (Connection.backup()) exists for exactly this: it produces a
+        # complete, consistent, checkpointed single-file snapshot while
+        # concurrent writers keep working, no downtime needed. Each .db
+        # is snapshotted into a temp dir first and the snapshot is what
+        # goes into the tarball; JSON files (already written atomically
+        # via router._atomic_write_json()) are tarred directly as
+        # before. If the backup API fails for a given file (e.g. a
+        # genuinely corrupted database), fall back to the old raw copy
+        # with a warning — a possibly-stale backup of that one file
+        # beats silently omitting it.
+        snapshot_dir = tempfile.mkdtemp(prefix="mnemolis-backup-")
+        try:
+            with tarfile.open(tmp_path, "w:gz") as tar:
+                included = []
+                for f in data_files:
+                    if not os.path.exists(f):
+                        continue
+                    name = os.path.basename(f)
+                    if f.endswith(".db"):
+                        snap_path = os.path.join(snapshot_dir, name)
+                        try:
+                            src = sqlite3.connect(f, timeout=10)
+                            try:
+                                dst = sqlite3.connect(snap_path)
+                                try:
+                                    src.backup(dst)
+                                finally:
+                                    dst.close()
+                            finally:
+                                src.close()
+                            tar.add(snap_path, arcname=name)
+                        except Exception as e:
+                            _LOGGER.warning(
+                                "SQLite online backup failed for %s (%s) — "
+                                "falling back to a raw file copy, which may "
+                                "miss un-checkpointed WAL writes", name, e
+                            )
+                            tar.add(f, arcname=name)
+                    else:
+                        tar.add(f, arcname=name)
+                    included.append(name)
+        finally:
+            shutil.rmtree(snapshot_dir, ignore_errors=True)
 
         # Found via a deliberate "bulletproofing" pass: `included` was
         # built (tracking which data files genuinely existed and got

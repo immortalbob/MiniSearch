@@ -368,7 +368,6 @@ def _resolve_changes_hours(query: str) -> float:
     # second one found during the same investigation ("24 hour clock
     # display").
     if "hour" in q:
-        import re
         m = re.search(r"(?:last|past|in the last|in the past|within the last)\s*(\d+)\s*hour", q)
         if m:
             return float(m.group(1))
@@ -463,6 +462,24 @@ ROUTING_CACHE_FILE = "/app/data/routing_cache.json"
 ROUTING_CACHE_TTL = settings.routing_cache_ttl_seconds
 _routing_cache: dict[str, tuple[str, float]] = {}
 _ROUTING_CACHE_MAX_SIZE: int = settings.routing_cache_max_size  # max entries before evicting oldest
+_routing_dirty_count: int = 0
+# Save to disk every N writes — the identical batching the result cache
+# (_CACHE_SAVE_INTERVAL below) has always had. Found via a deliberate
+# function-by-function audit: _set_routing() previously called
+# _save_routing_cache() unconditionally on EVERY single write, meaning
+# every cold routing decision (LLM source pick, book selection,
+# disambiguation candidates, alternate phrasing — four separate writers)
+# serialized the ENTIRE routing cache (up to _ROUTING_CACHE_MAX_SIZE =
+# 1000 entries) to disk as one full JSON dump, per write. Under exactly
+# the workload where routing writes cluster (a cold-cache benchmark or
+# any burst of genuinely new queries), that's the same full-file write
+# amplified once per decision, on the same request-serving threads. The
+# result cache accepted the identical tradeoff (losing up to
+# INTERVAL-1 recent writes on a hard crash, in exchange for 5x fewer
+# full-file writes) from the start; there was never a stated reason for
+# the routing cache to be different — the wiki's own Caching page
+# describes the batching as the shared persistence design.
+_ROUTING_CACHE_SAVE_INTERVAL: int = 5
 
 
 def _routing_cache_key(query: str) -> str:
@@ -507,6 +524,7 @@ def _set_routing(query: str, decision: str) -> None:
     function's docstring; this is the actual enforcement point for the
     real, found gap it documents.
     """
+    global _routing_dirty_count
     if _SUPPRESS_CACHE_WRITES.get():
         return
     key = _routing_cache_key(query)
@@ -515,8 +533,14 @@ def _set_routing(query: str, decision: str) -> None:
         _evict_oldest_routing()
         _LOGGER.info("Routing cache at max size (%d), evicted oldest entry", _ROUTING_CACHE_MAX_SIZE)
     _routing_cache[key] = (decision, time.time())
+    _routing_dirty_count += 1
     _LOGGER.info("Cached routing decision: '%s' -> %s", query[:50], decision)
-    _save_routing_cache()
+    # Batched persistence — see _ROUTING_CACHE_SAVE_INTERVAL's own
+    # comment above for why this now mirrors _set_cached()'s existing
+    # batching rather than writing the full file on every decision.
+    if _routing_dirty_count >= _ROUTING_CACHE_SAVE_INTERVAL:
+        _save_routing_cache()
+        _routing_dirty_count = 0
 
 
 def _atomic_write_json(filepath: str, data: dict) -> None:
@@ -663,8 +687,10 @@ def get_routing_cache_stats() -> list[dict]:
 
 def clear_routing_cache() -> int:
     """Clear all routing cache entries. Returns count removed."""
+    global _routing_dirty_count
     count = len(_routing_cache)
     _routing_cache.clear()
+    _routing_dirty_count = 0
     _save_routing_cache()
     return count
 
@@ -975,6 +1001,26 @@ def clear_cache() -> int:
     _cache_dirty_count = 0
     _save_cache()
     return count
+
+
+def flush_caches() -> None:
+    """Persist both the result cache and the routing cache to disk
+    immediately, regardless of either dirty counter's current value.
+
+    Exists for exactly one caller: main.py's lifespan shutdown. Both
+    caches batch their disk writes (every _CACHE_SAVE_INTERVAL /
+    _ROUTING_CACHE_SAVE_INTERVAL writes), which means up to
+    INTERVAL-1 recent entries were always in memory only at any given
+    moment — acceptable for a hard crash (each lost entry is just a
+    re-derivable source result or LLM decision), but a clean shutdown
+    (docker stop, a deploy restart) shouldn't discard them when one
+    cheap final write preserves everything.
+    """
+    global _cache_dirty_count, _routing_dirty_count
+    _save_cache()
+    _cache_dirty_count = 0
+    _save_routing_cache()
+    _routing_dirty_count = 0
 
 
 # ---------------------------------------------------------------------------

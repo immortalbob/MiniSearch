@@ -574,6 +574,24 @@ def _score_result(result: dict, query: str, primary_book: str) -> int:
     list_prefixes = ("list of", "lists of", "index of", "outline of", "category:")
     if any(title_lower.startswith(p) for p in list_prefixes):
         score -= 10
+
+    # Wikipedia bonus — the docstring above has always documented this
+    # (+8 definitional / +3 otherwise), but the bonus was previously
+    # nested INSIDE the list-article penalty block just above, with no
+    # `"wikipedia" in book` condition at all. Two real consequences,
+    # both confirmed directly: (1) Wikipedia results never received any
+    # bonus — the only thing separating an identical-title Wikipedia
+    # result from a Stack Exchange one was the +2 primary-book bonus,
+    # so whenever the LLM picked a non-Wikipedia book as primary, the
+    # Stack Exchange result WON on an identical definitional query;
+    # (2) list/index articles in ANY book had their -10 penalty
+    # silently softened to -2 (definitional) or -7 (other), which is
+    # what the "nets -2 or -7 after its own partial offset" comment in
+    # search() below was unknowingly describing. The existing
+    # test_wikipedia_bonus_* tests passed only via the +2 primary-book
+    # bonus, since both used Wikipedia as the primary book — see the
+    # new primary-book-flipped regression test pinning the real bonus.
+    if "wikipedia" in book:
         score += 8 if _is_definitional_query(query) else 3
 
     # Primary book bonus
@@ -875,8 +893,10 @@ def search(query: str) -> str:
     # dominates and the rest are noise.
     if len(selected_books) > 1 and top_score > 0:
         # Found via a deliberate complexity-investigation pass: a result
-        # can legitimately score negative (a list/index article nets -2
-        # or -7 after its own partial offset, with zero other matches).
+        # can legitimately score negative (a non-Wikipedia list/index
+        # article nets -10 with zero other matches; a Wikipedia one
+        # nets -2 or -7 after the Wikipedia bonus partially offsets the
+        # penalty).
         # If the OVERALL best result across every book happens to be
         # negative — every candidate is genuinely poor, not just one
         # book's — "score >= top_score * 0.5" silently breaks down for

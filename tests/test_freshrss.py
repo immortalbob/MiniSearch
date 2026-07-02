@@ -167,6 +167,13 @@ class TestRecencyBonus:
 class TestGetToken:
     """Tests for _get_token FreshRSS authentication."""
 
+    def setup_method(self):
+        # _get_token() now caches its result module-level (see
+        # freshrss._cached_token) — reset between tests so one test's
+        # cached token can't leak into another's assertions.
+        from app.sources import freshrss
+        freshrss._cached_token = None
+
     def test_returns_token_on_success(self):
         from app.sources import freshrss
         from app.config import settings
@@ -259,6 +266,149 @@ class TestGetToken:
         settings.freshrss_url = ""
         settings.freshrss_user = ""
         settings.freshrss_api_password = ""
+
+    def test_second_call_uses_cached_token_without_a_network_call(self):
+        """The whole point of the cache: search() previously paid a full
+        ClientLogin round trip on every single query. A second
+        _get_token() call must return the cached token without touching
+        the network at all."""
+        from app.sources import freshrss
+        from app.config import settings
+        from unittest.mock import patch, MagicMock
+        settings.freshrss_url = "http://freshrss"
+        settings.freshrss_user = "admin"
+        settings.freshrss_api_password = "password"
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.text = "SID=abc\nLSID=def\nAuth=mytoken123\n"
+        with patch("app.sources.freshrss.requests.post", return_value=mock_resp) as mock_post:
+            first = freshrss._get_token()
+            second = freshrss._get_token()
+        assert first == second == "mytoken123"
+        assert mock_post.call_count == 1
+        settings.freshrss_url = ""
+        settings.freshrss_user = ""
+        settings.freshrss_api_password = ""
+
+    def test_force_refresh_bypasses_cached_token(self):
+        from app.sources import freshrss
+        from app.config import settings
+        from unittest.mock import patch, MagicMock
+        settings.freshrss_url = "http://freshrss"
+        settings.freshrss_user = "admin"
+        settings.freshrss_api_password = "password"
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.text = "Auth=freshtoken456\n"
+        freshrss._cached_token = "staletoken"
+        with patch("app.sources.freshrss.requests.post", return_value=mock_resp) as mock_post:
+            token = freshrss._get_token(force_refresh=True)
+        assert token == "freshtoken456"
+        assert mock_post.call_count == 1
+        settings.freshrss_url = ""
+        settings.freshrss_user = ""
+        settings.freshrss_api_password = ""
+
+    def test_failed_refresh_clears_stale_cached_token(self):
+        """A failed re-auth must not leave the old, known-bad token
+        cached — otherwise the very next call would happily reuse the
+        token that just failed, defeating the 401-retry path entirely."""
+        from app.sources import freshrss
+        from app.config import settings
+        from unittest.mock import patch, MagicMock
+        settings.freshrss_url = "http://freshrss"
+        settings.freshrss_user = "admin"
+        settings.freshrss_api_password = "wrong"
+        mock_resp = MagicMock()
+        mock_resp.status_code = 401
+        freshrss._cached_token = "staletoken"
+        with patch("app.sources.freshrss.requests.post", return_value=mock_resp):
+            token = freshrss._get_token(force_refresh=True)
+        assert token is None
+        assert freshrss._cached_token is None
+        settings.freshrss_url = ""
+        settings.freshrss_user = ""
+        settings.freshrss_api_password = ""
+
+
+class TestSearchTokenRetry:
+    """Tests for search()'s single 401 retry with a freshly-fetched token
+    — the self-healing half of the token cache: a stale cached token
+    (API password changed, FreshRSS reinstalled) costs exactly one extra
+    request, never a wrong answer and never an unbounded retry loop."""
+
+    def setup_method(self):
+        from app.sources import freshrss
+        freshrss._cached_token = None
+
+    def _configure(self):
+        from app.config import settings
+        settings.freshrss_url = "http://freshrss"
+        settings.freshrss_user = "admin"
+        settings.freshrss_api_password = "password"
+
+    def _deconfigure(self):
+        from app.config import settings
+        settings.freshrss_url = ""
+        settings.freshrss_user = ""
+        settings.freshrss_api_password = ""
+
+    def test_401_with_cached_token_reauths_once_and_succeeds(self):
+        from app.sources import freshrss
+        from unittest.mock import patch, MagicMock
+        self._configure()
+        freshrss._cached_token = "staletoken"
+
+        auth_resp = MagicMock()
+        auth_resp.status_code = 200
+        auth_resp.text = "Auth=freshtoken\n"
+
+        stale_resp = MagicMock()
+        stale_resp.status_code = 401
+        fresh_resp = MagicMock()
+        fresh_resp.status_code = 200
+        fresh_resp.json.return_value = {"items": [{
+            "title": "Real headline",
+            "origin": {"title": "Real source"},
+            "summary": {"content": "Real content"},
+            "published": None,
+        }]}
+
+        try:
+            with patch("app.sources.freshrss.requests.post", return_value=auth_resp) as mock_post, \
+                 patch("app.sources.freshrss.requests.get", side_effect=[stale_resp, fresh_resp]) as mock_get:
+                result = freshrss.search("news")
+            assert "Real headline" in result
+            assert mock_get.call_count == 2   # stale attempt + one retry
+            assert mock_post.call_count == 1  # exactly one re-auth
+            # The retry must have used the FRESH token, not the stale one
+            retry_headers = mock_get.call_args_list[1].kwargs["headers"]
+            assert "freshtoken" in retry_headers["Authorization"]
+        finally:
+            self._deconfigure()
+
+    def test_second_401_after_fresh_token_does_not_retry_again(self):
+        from app.sources import freshrss
+        from unittest.mock import patch, MagicMock
+        self._configure()
+        freshrss._cached_token = "staletoken"
+
+        auth_resp = MagicMock()
+        auth_resp.status_code = 200
+        auth_resp.text = "Auth=freshtoken\n"
+        denied = MagicMock()
+        denied.status_code = 401
+
+        try:
+            with patch("app.sources.freshrss.requests.post", return_value=auth_resp), \
+                 patch("app.sources.freshrss.requests.get", return_value=denied) as mock_get:
+                result = freshrss.search("news")
+            # Exactly two article requests (original + single retry), then
+            # an honest error — never a loop.
+            assert mock_get.call_count == 2
+            assert "Error" in result
+        finally:
+            self._deconfigure()
 
 
 class TestSearch:

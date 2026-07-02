@@ -98,7 +98,33 @@ def _recency_bonus(published_unix: int | None) -> int:
     return 0
 
 
-def _get_token() -> str | None:
+# Cached FreshRSS Auth token — reused across calls rather than re-fetched
+# on every single search. Found via a deliberate function-by-function
+# audit: search() previously paid a full ClientLogin round trip (an extra
+# HTTP request + credential exchange against FreshRSS) on EVERY query,
+# despite Google Reader API Auth tokens being long-lived by design —
+# FreshRSS's own GReader implementation derives the token from stable
+# credentials rather than rotating it per session, so the same token
+# stays valid indefinitely until the API password changes. The identical
+# class of per-call-connection-setup cost already found and fixed twice
+# in this project (uptime_kuma.py's Socket.IO login, llm.py's TCP
+# connections), just one layer up the stack.
+#
+# Self-healing rather than TTL-guessing: search() invalidates and
+# re-fetches exactly once on an HTTP 401 from the articles request (the
+# real signal the token genuinely stopped working — an API password
+# change, a FreshRSS reinstall), so a stale token costs one extra
+# request, never a wrong answer. A plain module-level variable with no
+# lock, mirroring kiwix.py's _book_cache: two threads racing a cold
+# token both perform a harmless duplicate login and the last write wins
+# — a benign race, not a correctness one.
+_cached_token: str | None = None
+
+
+def _get_token(force_refresh: bool = False) -> str | None:
+    global _cached_token
+    if _cached_token and not force_refresh:
+        return _cached_token
     try:
         resp = requests.post(
             f"{settings.freshrss_url}/api/greader.php/accounts/ClientLogin",
@@ -107,14 +133,18 @@ def _get_token() -> str | None:
         )
         if resp.status_code != 200:
             _LOGGER.warning("FreshRSS auth failed: HTTP %d", resp.status_code)
+            _cached_token = None
             return None
         for line in resp.text.splitlines():
             if line.startswith("Auth="):
-                return line[5:]
+                _cached_token = line[5:]
+                return _cached_token
         _LOGGER.warning("FreshRSS auth response missing Auth= token")
+        _cached_token = None
         return None
     except Exception as e:
         _LOGGER.warning("FreshRSS auth request failed: %s", e)
+        _cached_token = None
         return None
 
 
@@ -131,6 +161,22 @@ def search(query: str) -> str:
             params={"n": settings.freshrss_max_articles, "output": "json"},
             timeout=10,
         )
+        if resp.status_code == 401:
+            # The cached token stopped working (API password changed,
+            # FreshRSS reinstalled) — invalidate, re-authenticate once,
+            # and retry. Exactly one retry: a second 401 with a genuinely
+            # fresh token means the credentials themselves are wrong,
+            # which retrying can't fix.
+            _LOGGER.info("FreshRSS returned 401 with cached token — re-authenticating")
+            token = _get_token(force_refresh=True)
+            if not token:
+                return "Error: Could not authenticate with FreshRSS. Check credentials."
+            resp = requests.get(
+                f"{settings.freshrss_url}/api/greader.php/reader/api/0/stream/contents/reading-list",
+                headers={"Authorization": f"GoogleLogin auth={token}"},
+                params={"n": settings.freshrss_max_articles, "output": "json"},
+                timeout=10,
+            )
         if resp.status_code != 200:
             _LOGGER.warning("FreshRSS articles request failed: HTTP %d", resp.status_code)
             return f"Error: FreshRSS returned {resp.status_code}"

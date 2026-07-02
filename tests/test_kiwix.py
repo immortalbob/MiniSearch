@@ -394,6 +394,43 @@ class TestScoreResult:
         se_def = self.score(se_result, query_def, primary)
         assert wiki_def > se_def
 
+    def test_wikipedia_bonus_applies_independent_of_primary_book(self):
+        """Regression test for a real, confirmed bug found via a
+        function-by-function audit: the documented Wikipedia bonus
+        (+8 definitional / +3 otherwise) was nested inside the
+        list-article penalty block with no `"wikipedia" in book`
+        condition at all — Wikipedia results never actually received
+        it. The two existing test_wikipedia_bonus_* tests above passed
+        anyway, but only via the +2 primary-book bonus (both use
+        Wikipedia as the primary book) — flipping the primary book to
+        Stack Exchange, an identical-title definitional query genuinely
+        scored HIGHER for the Stack Exchange result before this fix
+        (30 vs 32, confirmed directly). This test pins the bonus with
+        the primary-book bonus pointing the other way, so it can only
+        pass if the Wikipedia bonus itself is real."""
+        wiki_result = self._result("Zymurgy", book="wikipedia_en_all_maxi_2026-02")
+        se_result = self._result("Zymurgy", book="electronics.stackexchange.com_en_all_2026-02")
+        query = "what is zymurgy"
+        primary = "electronics.stackexchange.com_en_all_2026-02"  # deliberately NOT wikipedia
+        assert self.score(wiki_result, query, primary) > self.score(se_result, query, primary)
+
+    def test_list_penalty_is_not_softened_for_non_wikipedia_books(self):
+        """Companion regression test for the same misplaced-bonus bug:
+        because the +8/+3 previously lived INSIDE the list-penalty
+        block, a list article in ANY book had its -10 penalty silently
+        softened to -2 or -7. With the bonus correctly scoped to
+        Wikipedia results, a non-Wikipedia list article must carry the
+        full, undiluted -10 relative to an identically-booked
+        non-list article with the same title overlap."""
+        book = "electronics.stackexchange.com_en_all_2026-02"
+        primary = "wikipedia_en_all_maxi_2026-02"
+        list_result = self._result("List of capacitor types", book=book)
+        plain_result = self._result("Capacitor types", book=book)
+        query = "what are capacitor types"
+        # Both share the same real title-word overlap ("capacitor",
+        # "types"); the list article must lose by the full penalty.
+        assert self.score(plain_result, query, primary) - self.score(list_result, query, primary) >= 10
+
 
 class TestScoreResultDiscourseFramingWordsExcluded:
     """Regression tests for a real bug found by tracing a live, bad

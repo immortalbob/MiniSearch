@@ -828,6 +828,59 @@ class TestBackupEndpoint:
             # Should contain at least the files that exist on disk
             assert isinstance(names, list)
 
+    def test_backup_captures_uncheckpointed_wal_writes(self, client, tmp_path):
+        """Regression test for a real data-integrity gap found via a
+        deliberate function-by-function audit: every Mnemolis SQLite
+        database runs in WAL mode, so recent committed writes live in
+        the -wal sidecar file until the next checkpoint — and /backup
+        previously tar'd only the bare .db file, silently producing
+        backups missing every not-yet-checkpointed write. The fix uses
+        SQLite's own online backup API to snapshot each database into
+        a complete, consistent single file first.
+
+        This test constructs the exact hazardous condition: a WAL-mode
+        database with autocheckpointing disabled, a committed row, and
+        the writer connection deliberately held OPEN across the /backup
+        call (closing it would checkpoint the WAL and mask the bug).
+        The row must be readable from the database file inside the
+        returned tarball. Confirmed this exact test fails against the
+        old tar.add()-the-bare-file behavior."""
+        import io
+        import sqlite3
+        import tarfile
+        from unittest.mock import patch
+
+        db_path = tmp_path / "waltest.db"
+        writer = sqlite3.connect(str(db_path))
+        try:
+            writer.execute("PRAGMA journal_mode=WAL")
+            writer.execute("PRAGMA wal_autocheckpoint=0")
+            writer.execute("CREATE TABLE t (v TEXT)")
+            writer.execute("INSERT INTO t (v) VALUES ('committed-but-uncheckpointed')")
+            writer.commit()
+            # The -wal sidecar must genuinely exist and hold the write,
+            # or this test isn't exercising the real hazard at all.
+            assert (tmp_path / "waltest.db-wal").exists()
+
+            with patch("app.main._BACKUP_DATA_FILES", [str(db_path)]):
+                resp = client.get("/backup")
+            assert resp.status_code == 200
+
+            with tarfile.open(fileobj=io.BytesIO(resp.content), mode="r:gz") as tar:
+                member = tar.extractfile("waltest.db")
+                assert member is not None
+                extracted = tmp_path / "extracted.db"
+                extracted.write_bytes(member.read())
+
+            reader = sqlite3.connect(str(extracted))
+            try:
+                rows = reader.execute("SELECT v FROM t").fetchall()
+            finally:
+                reader.close()
+            assert rows == [("committed-but-uncheckpointed",)]
+        finally:
+            writer.close()
+
 
 class TestLogsStatsEndpoint:
     """Tests for GET /logs/stats."""
