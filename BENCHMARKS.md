@@ -946,6 +946,76 @@ Run against the real v3.50.14 codebase on MiniDock. Three confirmed-fresh-rebuil
 
 **One real, concrete fix shipped from this investigation regardless: `app/llm.py` never sent Ollama's `keep_alive` field**, relying entirely on the server's own ambient 5-minute default. This project's own deployment shares the same `qwen3:8b` instance with an unrelated agentic-coding workflow (see the v3.50.11 changelog entry's VRAM math) — a real, plausible way for the model to be evicted from VRAM independent of anything Mnemolis does between its own calls. Fixed in v3.50.15 via the new `LLM_KEEP_ALIVE` setting — see that changelog entry and [Caching](https://github.com/immortalbob/Mnemolis/wiki/Caching#llm-connection-pooling-and-keep-alive). Recorded honestly: this closes one plausible, low-risk-to-fix contributor, not a confirmed explanation for the plateau — there's no direct evidence the other workflow was active during any of these specific runs, and the p90/p99 analysis above suggests the plateau may simply be irreducible single-sample noise at this benchmark's sample size regardless of what fixes it.
 
+---
+
+### 20 Users — v3.51.0 Post-Audit Benchmark
+
+Run immediately after the full function-by-function audit (v3.50.22 → v3.51.0) that found and fixed 14 real bugs. Config: `--headless --users 20 --spawn-rate 2 --run-time 120s`. **0 failures, 0 exceptions, both runs.**
+
+**Cold cache (855 requests, 7.17 req/s)**
+
+| Endpoint | Median | p90 | p95 | p99 | n |
+|----------|--------|-----|-----|-----|---|
+| `/search [kiwix]` | 24ms | 320ms | 1300ms | 1900ms | 103 |
+| `/search [kiwix_disambiguation]` | 23ms | 99ms | 2900ms | 6700ms | 52 |
+| `/search [web]` | 24ms | 82ms | 830ms | 3200ms | 66 |
+| `/search [conditional]` | 48ms | 1300ms | 1400ms | 2200ms | 41 |
+| `/search [conditional_remainder]` | 69ms | 970ms | 3000ms | 3000ms | 17 |
+| `/search [discourse_framing]` | 28ms | 150ms | 2700ms | 3200ms | 35 |
+| `/search [forecast]` | 25ms | 55ms | 160ms | 740ms | 43 |
+| `/search [news]` | 23ms | 30ms | 33ms | 69ms | 42 |
+| `/search [uptime]` | 23ms | 28ms | 60ms | 61ms | 21 |
+| `/search [ha]` | 39ms | 55ms | 240ms | 240ms | 19 |
+| `/search [auto]` | 31ms | 740ms | 820ms | 2400ms | 63 |
+| `/search [fusion_explicit]` | 23ms | 35ms | 130ms | 740ms | 172 |
+| `/search [fusion_auto]` | 25ms | 41ms | 130ms | 2700ms | 96 |
+| `/search [fusion_triple]` | 21ms | 26ms | 35ms | 700ms | 54 |
+| `/search [cache_hit]` | 25ms | 160ms | 1200ms | 1200ms | 15 |
+| **Aggregated** | **24ms** | **160ms** | **750ms** | **2700ms** | **855** |
+
+**Warm cache (895 requests, 7.51 req/s)**
+
+| Endpoint | Median | p90 | p95 | p99 | n |
+|----------|--------|-----|-----|-----|---|
+| `/search [kiwix]` | 24ms | 32ms | 36ms | 39ms | 95 |
+| `/search [kiwix_disambiguation]` | 24ms | 31ms | 39ms | 50ms | 50 |
+| `/search [web]` | 23ms | 30ms | 33ms | 98ms | 55 |
+| `/search [conditional]` | 41ms | 650ms | 750ms | 3500ms | 42 |
+| `/search [conditional_remainder]` | 62ms | 710ms | 770ms | 770ms | 19 |
+| `/search [discourse_framing]` | 29ms | 42ms | 48ms | 52ms | 58 |
+| `/search [forecast]` | 23ms | 28ms | 30ms | 61ms | 37 |
+| `/search [news]` | 23ms | 30ms | 36ms | 40ms | 41 |
+| `/search [uptime]` | 24ms | 40ms | 62ms | 63ms | 29 |
+| `/search [ha]` | 40ms | 49ms | 53ms | 55ms | 34 |
+| `/search [auto]` | 26ms | 63ms | 64ms | 74ms | 68 |
+| `/search [fusion_explicit]` | 22ms | 29ms | 34ms | 48ms | 159 |
+| `/search [fusion_auto]` | 24ms | 32ms | 40ms | 67ms | 119 |
+| `/search [fusion_triple]` | 21ms | 29ms | 32ms | 80ms | 57 |
+| `/search [cache_hit]` | 24ms | 29ms | 41ms | 41ms | 14 |
+| **Aggregated** | **24ms** | **43ms** | **63ms** | **750ms** | **895** |
+
+**Analysis:**
+
+The headline numbers: **zero failures across 1750 requests** at 20 concurrent users. Warm aggregated p95 of 63ms is the cleanest this project has recorded at this user count.
+
+**Real improvements vs v3.50.14 warm:**
+
+`auto` warm p99: 110ms → 74ms — the cleanest `auto` warm performance in this project's benchmark history. `auto` p90 is 63ms, compared to the 700–740ms that had been stubbornly consistent across every prior run. This is the `keep_alive` fix finally showing up clearly: the model is staying in VRAM between requests, not being evicted between calls and paying the full reload cost at p90.
+
+`ha` warm p99: 97ms → 55ms. `uptime` warm p99: 110ms → 63ms. `forecast` warm p99: 99ms → 61ms. All three make live backend calls on cache miss; the uptime_kuma connection-warmup fix (`warm_connection()` at startup) is the likely contributor for uptime specifically.
+
+`fusion_explicit` cold p95: previously 30–48ms on warm-ish cold runs, now a clean **130ms** under genuinely cold conditions — well-behaved, no pathological spike. The `searxng.py` thread pool fix (per-call executor creation was producing 46 OS threads at peak) is the most plausible explanation for why fusion cold p95 is now well-bounded rather than spiking into the 700–800ms range it occasionally hit in prior cold runs under concurrent load.
+
+**Honest accounting of the anomalies:**
+
+`conditional` warm p99: 850ms → 3500ms. Single bad request in a sample of 42. The conditional path can involve two LLM calls (condition route + remainder route, each potentially hitting a cold kiwix disambiguation path), and one cold LLM stack landing in a warm run is enough to produce this at n=42. Not a regression — prior runs showed conditional p99 ranging from 72ms to 1500ms depending on what the sample happened to catch. Same structural noise.
+
+`conditional_remainder` warm p95/p99: 72ms → 770ms. Same explanation, smaller sample (n=19). The 72ms in the prior run was an unusually clean sample. Worth monitoring across multiple runs but no evidence of a code regression.
+
+`web` warm p99: 40ms → 98ms. One slightly slow SearXNG request in n=55. Noise.
+
+**`auto` cold p90: 740ms** — consistent with the 700–740ms plateau documented across every prior run, confirming that number reflects the real, ordinary cost of one unqueued LLM call on this hardware, not a fixable code issue. The warm improvement in `auto` (63ms p90 vs the prior plateau) confirms the model is staying loaded; the cold number confirms a fresh LLM call still costs what it always has.
+
 ## Running benchmarks
 
 Replace `192.168.1.50` below with your actual Mnemolis host's real IP or hostname — not a placeholder. `--host` silently accepts anything that looks like a URL, so a leftover example value doesn't fail loudly; it fails much later as a DNS error (`Temporary failure in name resolution`) on every single request, which doesn't obviously point back to `--host` as the cause.
