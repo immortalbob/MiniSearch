@@ -4,6 +4,53 @@ All notable changes to Mnemolis are documented here, from v3.45.0 onward. For ev
 
 ---
 
+## [3.51.0]
+
+### Systematic Function-by-Function Audit Complete — 14 Real Bugs Found and Fixed
+
+This release closes a sustained, multi-session audit that read every function in every file in `app/` — smallest to largest — and verified each one directly rather than trusting its own documentation. The complete account is in `wiki/The-Full-Audit-Pass.md`. Summary of what was found:
+
+**`query_expansion.py` (83 lines):** No bugs. 2-length-rejection boundary tests added.
+
+**`forecast.py` (108 lines):** Malformed partial API responses (HTTP 200, fewer than 3 days of data) raised uncaught `IndexError`/`KeyError` past the existing `try/except`. Fixed by wrapping data-consumption in a second `try/except`. 2 new tests.
+
+**`timeutil.py` (153 lines):** `local_hour_bucket()` docstring claimed wrong range formula. 1 new regression test.
+
+**`mcp_server.py` (160 lines):** Two independent `"/mcp"` string literals with nothing enforcing agreement. Consolidated into `MCP_MOUNT_PATH` constant. 2 new tests.
+
+**`freshrss.py` (187 lines):** HTML stripping stopped at first `>` in attribute values, leaking `">` into article summaries. HTML entities never decoded. Fixed with BeautifulSoup. 6 new tests.
+
+**`searxng.py` (194 lines):** New `ThreadPoolExecutor` created on every call (46 OS threads at peak). Early timeout return inside `with ThreadPoolExecutor` held caller for 0.50s past timeout. Both fixed with shared module-level executor. 5 new tests.
+
+**`llm.py` (194 lines):** Dict-shaped `reasoning` field (a different OpenAI-proper convention) would crash `.splitlines()`. Defensive `isinstance` guard added. Self-introduced lint regression (`MCP_MOUNT_PATH` placed mid-import-block) found and fixed. 2 new tests.
+
+**`scoring.py` (229 lines):** Possessive forms (`"Apple's"`) stemmed to `"apple'"` instead of `"apple"` — 20-point scoring gap confirmed by direct measurement. Generic-title detection applied `startswith()` uniformly to single-word patterns like `"home"` and `"error"`, penalizing real news articles. Both fixed. 7 new tests.
+
+**`uptime_kuma.py` (229 lines):** Unknown status codes beyond 0–3 dropped monitors silently, producing `"All 0 monitored services are up"`. `get_connection()` called from startup without `_connection_lock` (contract violation). Both fixed. `warm_connection()` added. 2 new tests.
+
+**`config.py` (467 lines):** No code bugs. `KIWIX_MULTI_BOOK_FUSION_THRESHOLD_PCT` naming vs value clarified in wiki.
+
+**`home_assistant.py` (627 lines):** No bugs.
+
+**`fusion.py` (668 lines):** No bugs. Deepseek's two reported vulnerabilities verified as false (wrong premises confirmed by tracing actual source HTTP timeouts).
+
+**`snapshots.py` (696 lines):** `seen_changes` set in `get_changes()` suppressed legitimate repeated HA and news events — a door opening, closing, then opening again only reported the first two transitions. Removed entirely. 2 new tests confirming second occurrence is reported.
+
+**`temporal_patterns.py` (870 lines):** No bugs. Statistical functions verified against known Poisson values.
+
+**`kiwix.py` (957 lines):** No bugs. Dead defensive guard documented with explanatory comment explaining why it's kept despite being currently unreachable.
+
+**`adversarial_testing.py` (1120 lines):** No bugs.
+
+**`main.py` (1179 lines):** TTFK SQL used `MIN(latency_ms)` and `MIN(id)` as independent aggregates in the same `GROUP BY` — reporting the fastest cold run rather than the genuine first cold hit. Fixed with a join back to the row with `min(id)`. 1 new test.
+
+**`router.py` (2482 lines):** No bugs. Every function verified: routing cache, singleflight lock mechanism, cache suppression thread-locality, discourse-framing escalation paths, conditional detection, decomposition, fallback chain, all SQL and serialization paths.
+
+### Changed
+- Version bumped to 3.51.0 — the first release in which every function in every `app/` file has been read and verified directly
+
+---
+
 ## [3.50.30]
 
 ### Fixed — Three Real Bugs Found via Deliberate Function-by-Function Reads of `snapshots.py` and `main.py`
