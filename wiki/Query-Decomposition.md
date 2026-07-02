@@ -78,6 +78,16 @@ A small set of recognized colloquial question patterns (`"what's the deal with"`
 
 It splits independent intents — it deliberately does *not* try to handle a leading conditional structure (*"if the back door is unlocked, let me know"*), since that's not a flat list of separate questions, it's a single statement with a condition and a consequence. That's [Conditional Query Detection](Conditional-Query-Detection)'s job, and it runs *before* decomposition at the top level — but a decomposed sub-query can still turn out to be conditional in its own right, which is why conditional detection gets re-applied to every sub-query decomposition produces, not just the original full query.
 
+## Sub-queries resolve concurrently (v3.52.0)
+
+Once split, sub-queries are genuinely independent by construction — the splitter only ever separates distinct intents, and no sub-query's resolution reads another's result. As of v3.52.0 they route *concurrently* rather than back to back: a 3-intent cold compound query previously paid three stacked LLM-routing + source-fetch costs sequentially, the largest remaining sequential-work latency cost in the routing path after the [SearXNG](The-SearXNG-Timeout-Lesson) and [conditional condition/remainder](Conditional-Query-Detection) parallelizations of the same shape.
+
+Three deliberate design points, each carrying a lesson learned elsewhere in this project:
+
+- **A fresh, per-call executor, bounded by `min(len(sub_queries), DECOMPOSE_MAX_PARALLEL)` — deliberately *not* a shared module-level pool like fusion's.** These workers recurse into `route_with_source()`, which can hit the decomposition path again (a sub-query's condition text that itself decomposes) — and a shared pool that submits into itself and blocks on the result is a real deadlock under saturation. A fresh pool per nesting level cannot deadlock, and decomposed multi-intent queries are rare enough that per-call construction isn't the unbounded-thread-pressure pattern fusion's hot path had. Same judgment already made for `_resolve_conditional()`'s own per-call executor.
+- **`contextvars.copy_context()` once per task** — the identical constraint documented at every other executor site: `Context.run()` is non-reentrant across concurrent execution, and a bare `submit()` silently drops `suppress_cache_writes()` inside workers. The copied Context shares the same `_ROUTE_STATS` dict object by reference, so cache/fallback facts recorded inside workers still reach `route_query()`'s per-request stats.
+- **Futures are collected in submission order, never `as_completed()`** — the merged response's section order must match the order the person actually asked things in, not network completion order. A regression test deliberately makes the first-asked sub-query the slow one and asserts the sections still come back in ask order.
+
 ---
 
 ## Development Notes

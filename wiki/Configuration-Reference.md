@@ -61,6 +61,7 @@ Every setting is an environment variable, set in `docker-compose.yml`. This page
 | `FUSION_MAX_CHARS_PER_SOURCE` | `1500` | Per-source truncation before merging |
 | `FUSION_TIMEOUT_SECONDS` | `15` | How long any single source gets before fusion moves on without it — as of v3.50.18 this now genuinely bounds how long the *caller* waits too, not just how long the internal gather loop waits before giving up on a straggler |
 | `FUSION_THREAD_POOL_SIZE` | `12` | Worker threads in fusion's shared, long-lived thread pool — reused across every concurrent fusion call rather than a fresh pool spun up and torn down per call. See [Fusion](Fusion#concurrency-and-thread-pool-sizing) |
+| `DECOMPOSE_MAX_PARALLEL` | `4` | How many [decomposed](Query-Decomposition#sub-queries-resolve-concurrently-v3520) sub-queries one compound query resolves concurrently (v3.52.0). Uses a fresh, per-call executor bounded by `min(len(sub_queries), this)` — deliberately not a shared pool, since these workers recurse into the router itself and a shared pool submitting into itself is a real deadlock under saturation. Realistic decomposed queries are 2–4 intents, so the default covers them fully while capping what a pathological many-conjunction query can fan out to |
 
 ## Caching
 
