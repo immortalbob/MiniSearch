@@ -4,6 +4,23 @@ All notable changes to Mnemolis are documented here, from v3.45.0 onward. For ev
 
 ---
 
+## [3.51.1]
+
+### Fixed — MCP `search` Tool Now Correctly Sets `isError=True` on Genuine Failures
+
+The `search` tool's broad `try/except` caught all exceptions and returned `"Error: {e}"` as a plain string, so `isError` was always `False` regardless of what actually went wrong underneath. A real internal failure (a genuine bug in routing or source logic) was indistinguishable from a normal "source not configured" response at the MCP protocol level — both looked identical to a client checking `isError`.
+
+The underlying SDK already handled this correctly one layer up: an uncaught exception inside a tool function propagates to the low-level server's `CallToolRequest` handler, which calls `_make_error_result()` and returns `CallToolResult(isError=True, ...)`. Mnemolis's own `try/except` was simply catching everything first, preventing that path from ever being reached.
+
+The fix is removing the `try/except` entirely. `route()` already returns descriptive strings for all expected, recoverable failures (source not configured, empty results, unknown source name) rather than raising — those come back as normal successful responses as before. A genuine unexpected exception now propagates to the SDK and surfaces as `isError=True`, giving real MCP clients a structured way to distinguish the two cases. Confirmed directly: `asyncio.to_thread` propagates exceptions correctly, and the SDK's handler converts them to `isError=True` as documented.
+
+Updated `wiki/MCP-Server.md` to reflect the new contract. Updated `wiki/Roadmap.md` to mark this item complete and add the full audit pass section.
+
+### Changed
+- Version bumped to 3.51.1
+
+---
+
 ## [3.51.0]
 
 ### Systematic Function-by-Function Audit Complete — 14 Real Bugs Found and Fixed

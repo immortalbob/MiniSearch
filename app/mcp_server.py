@@ -110,12 +110,22 @@ async def search(
             when source='fusion'. If omitted, the LLM picks the best 2-3
             sources automatically.
     """
-    try:
-        result = await asyncio.to_thread(route, query, source, fusion_sources)
-        return result
-    except Exception as e:
-        _LOGGER.error("Mnemolis MCP error: %s", e)
-        return f"Error: {e}"
+    # No try/except here — deliberate. route() already returns descriptive
+    # strings for all expected, recoverable failures (source not configured,
+    # empty results, unknown source name) rather than raising, so those are
+    # handled transparently. A genuine, unexpected exception (a real bug in
+    # routing or source logic) propagates to the SDK's own handler one level
+    # up, which converts it to CallToolResult(isError=True, ...) — giving
+    # a real MCP client a structured way to distinguish "Mnemolis answered
+    # with bad news" (isError=False, content starts with "Error: ...") from
+    # "the call itself genuinely failed" (isError=True). The previous broad
+    # try/except made both cases look identical at the protocol level, which
+    # was the tracked gap in the roadmap and wiki/MCP-Server.md. Confirmed
+    # directly: asyncio.to_thread propagates exceptions correctly, and the
+    # SDK's CallToolRequest handler catches them and calls _make_error_result.
+    _LOGGER.info("MCP search: query=%r source=%r", query[:80], source)
+    result = await asyncio.to_thread(route, query, source, fusion_sources)
+    return result
 
 
 def get_mcp_app():
