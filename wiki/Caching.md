@@ -55,7 +55,7 @@ A defensive cap also applies when loading the routing cache back from disk at st
 
 ## Semantic routing cache (v3.53.0)
 
-A third, optional layer that sits between a routing-cache miss and the routing LLM: embedding-based reuse of routing decisions across *rephrasings* — "will it rain later" borrowing "will it rain this evening"'s already-made decision instead of paying its own cold LLM call. Disabled unless `EMBEDDING_MODEL` is configured; stores only embeddings (decisions always come from the live routing cache at match time, so there is exactly one source of truth and one TTL); in-memory only, rebuilt through use after a restart. It gets its own full page — see [Semantic Routing Cache](Semantic-Routing-Cache) for the design constraints, the conservative-threshold reasoning, and the setup.
+A third, optional layer that sits between a routing-cache miss and the routing LLM: embedding-based reuse of routing decisions across *rephrasings* — "will it rain later" borrowing "will it rain this evening"'s already-made decision instead of paying its own cold LLM call. Disabled unless `EMBEDDING_MODEL` is configured; stores only embeddings (decisions always come from the live routing cache at match time, so there is exactly one source of truth and one TTL); in-memory only, re-warmed from the routing cache's persisted queries by a background thread at startup (v3.54.0) and rebuilt through use otherwise. It gets its own full page — see [Semantic Routing Cache](Semantic-Routing-Cache) for the design constraints, the conservative-threshold reasoning, and the setup.
 
 ## What's visible without digging through code
 
