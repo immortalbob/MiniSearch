@@ -89,6 +89,58 @@ WEB_QUERIES = [
     "docker compose syntax",
 ]
 
+# Semantic-rephrase pool — measures the v3.53.0 semantic routing cache.
+# Each entry is a TOPIC with several colloquial rephrasings of the same
+# underlying question; a task picks a topic, then a random phrasing of
+# it. On a cold run against a deployment with EMBEDDING_MODEL set, the
+# first phrasing of each topic pays the full LLM routing call and every
+# later phrasing should land an intent_semantic reuse instead — so this
+# task's cold p50/p90 vs [auto]'s is the semantic cache's measured win,
+# and against a deployment WITHOUT embeddings it degrades to a plain
+# extra [auto]-shaped load (harmless, just not informative). Phrasings
+# deliberately include the apostrophe-less colloquial forms
+# ("whats the story with") that the v3.53.1 term-building fix covers,
+# so a regression in EITHER feature shows up here.
+SEMANTIC_REPHRASE_TOPICS = [
+    [
+        "what is molybdenum",
+        "whats the story with molybdenum",
+        "tell me about molybdenum",
+        "explain molybdenum to me",
+    ],
+    [
+        "will it rain this weekend",
+        "is rain expected this weekend",
+        "any rain coming this weekend",
+        "whats the chance of rain this weekend",
+    ],
+    [
+        "are all my services up",
+        "is everything up right now",
+        "any of my services down",
+        "are my services healthy",
+    ],
+    [
+        "latest news headlines",
+        "whats in the news today",
+        "any big news today",
+        "catch me up on the news",
+    ],
+    [
+        "what is quantum computing",
+        "whats the deal with quantum computing",
+        "explain quantum computing",
+        "quantum computing overview",
+    ],
+    [
+        "is the front door locked",
+        "did I lock the front door",
+        "front door lock status",
+        "check whether the front door is locked",
+    ],
+]
+
+
 AUTO_QUERIES = [
     "what is the weather this weekend",
     "are all my services up",
@@ -366,6 +418,18 @@ class MnemolisSingleSourceUser(HttpUser):
             "query": random.choice(AUTO_QUERIES),
             "source": "auto"
         }, name="/search [auto]")
+
+    @task(2)
+    def semantic_rephrase(self):
+        """Rephrasings of shared topics — measures the semantic routing
+        cache (see SEMANTIC_REPHRASE_TOPICS' own comment). Kept as its
+        own named bucket so its cold-run latency distribution is
+        directly comparable against [auto]'s in the results table."""
+        topic = random.choice(SEMANTIC_REPHRASE_TOPICS)
+        self.client.post("/search", json={
+            "query": random.choice(topic),
+            "source": "auto"
+        }, name="/search [semantic_rephrase]")
 
     @task(2)
     def conditional(self):

@@ -1,4 +1,5 @@
 import asyncio
+import threading
 import concurrent.futures
 import logging
 import os
@@ -24,6 +25,7 @@ from app.router import (
     clear_cache,
     load_cache,
     load_routing_cache,
+    warm_semantic_routing_cache,
     flush_caches,
     get_routing_cache_stats,
     clear_routing_cache,
@@ -258,6 +260,23 @@ async def lifespan(app: FastAPI):
         await loop.run_in_executor(None, get_books)
         await loop.run_in_executor(None, load_cache)
         await loop.run_in_executor(None, load_routing_cache)
+        # Semantic routing cache warmup — re-embed the routing cache's
+        # just-loaded persisted queries so rephrasings match immediately
+        # after a restart instead of only after each query has been
+        # re-decided once (the store itself is deliberately in-memory
+        # only). A daemon THREAD, not an awaited executor call like the
+        # loads above: those must finish before requests are served,
+        # while the warmup must NOT delay startup — it's pure
+        # optimization, its absence is just the lazy population that was
+        # already normal, and it makes network calls to a backend that
+        # may itself still be booting after a host restart. Guarded
+        # inside warm_semantic_routing_cache() (no-op when
+        # SEMANTIC_WARMUP_ENABLED is off or no EMBEDDING_MODEL is set).
+        threading.Thread(
+            target=warm_semantic_routing_cache,
+            name="semantic-warmup",
+            daemon=True,
+        ).start()
         await loop.run_in_executor(None, _init_log_db)
         await loop.run_in_executor(None, init_snapshot_db)
         if settings.adversarial_test_enabled:
@@ -332,7 +351,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Mnemolis",
     description="Unified local knowledge search API with multi-source fusion. Routes queries to Kiwix, Open-Meteo, FreshRSS, SearXNG, Uptime Kuma, or multiple sources concurrently.",
-    version="3.53.1",
+    version="3.54.0",
     lifespan=lifespan,
 )
 

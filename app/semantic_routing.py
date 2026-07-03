@@ -65,7 +65,7 @@ import time
 from typing import Callable, NamedTuple
 
 from app.config import settings
-from app.llm import embed, embeddings_configured
+from app.llm import embed, embed_batch, embeddings_configured
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -258,6 +258,82 @@ def find_similar(
     for d in dead:
         _store.pop(d, None)
     return None, normalized
+
+
+_WARMUP_BATCH_SIZE = 32
+
+
+def warm(entries: list[tuple[str, float]]) -> int:
+    """Pre-populate the store from previously-decided queries — the
+    startup warmup. Returns how many embeddings were stored.
+
+    The store is deliberately in-memory only (design constraint 3), so
+    every restart used to mean cold rephrasings paid the routing LLM
+    again until the store lazily repopulated. But routing_cache.json
+    PERSISTS — the queries and their decisions survive the restart, and
+    only the vectors were missing. Re-embedding those persisted queries
+    at startup is cheap (batched — see embed_batch()'s own comment) and
+    restores the full pre-restart matching ability without introducing
+    any of the on-disk-vector problems constraint 3 exists to avoid:
+    nothing is persisted, model changes still just mean re-embedding,
+    and the routing cache remains the single source of truth for
+    decisions exactly as before.
+
+    `entries` is (query, decided_at) pairs whose routing decisions are
+    LIVE — the caller (router.warm_semantic_routing_cache()) filters by
+    the routing TTL before handing them over, so this never embeds a
+    query whose decision find_similar() would immediately skip as
+    expired. Newest-first up to the capacity the store has left, so
+    when there are more persisted queries than room, the ones most
+    likely to be rephrased soon win the slots. Already-present keys are
+    skipped rather than re-embedded (a warm store from a previous
+    warmup, or requests that arrived before this background thread got
+    scheduled).
+
+    One failed batch aborts the whole warmup with a warning rather than
+    retrying or continuing: a batch failure here almost always means
+    the embedding backend is down or the model isn't pulled, and every
+    subsequent batch would fail identically — and a partial (or empty)
+    store is exactly the state the feature already handles gracefully,
+    since lazy through-use population remains the normal path.
+    """
+    if not embeddings_configured():
+        return 0
+    reset_if_model_changed()
+
+    capacity = settings.semantic_cache_max_size - len(_store)
+    if capacity <= 0:
+        return 0
+
+    fresh = [
+        (query.lower().strip(), ts) for query, ts in entries
+        if query.lower().strip() not in _store
+    ]
+    fresh.sort(key=lambda pair: pair[1], reverse=True)  # newest first
+    fresh = fresh[:capacity]
+    if not fresh:
+        return 0
+
+    stored = 0
+    now = time.time()
+    for i in range(0, len(fresh), _WARMUP_BATCH_SIZE):
+        batch = fresh[i:i + _WARMUP_BATCH_SIZE]
+        vectors = embed_batch([q for q, _ts in batch])
+        if vectors is None:
+            _LOGGER.warning(
+                "Semantic cache warmup aborted after %d embeddings — batch "
+                "embed failed (backend down or model not pulled?); the "
+                "store will continue to populate lazily through use as "
+                "always", stored,
+            )
+            return stored
+        for (query, _ts), vector in zip(batch, vectors):
+            normalized = _normalize(vector)
+            if normalized is None:
+                continue
+            _store[query] = (normalized, now)
+            stored += 1
+    return stored
 
 
 def stats() -> dict:

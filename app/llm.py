@@ -302,3 +302,57 @@ def embed(text: str) -> list[float] | None:
     except Exception as e:
         _LOGGER.warning("Embedding call failed (%s): %s", api_type, e)
         return None
+
+
+def embed_batch(texts: list[str], timeout: int = 30) -> list[list[float]] | None:
+    """Return embedding vectors for `texts` in order, or None on any
+    failure. One HTTP round trip for the whole batch — both backends
+    accept list input natively (Ollama /api/embed's "input" and the
+    OpenAI-compatible /v1/embeddings' "input" are each documented as
+    string-or-list) — which is what makes the semantic cache's startup
+    warmup a handful of requests instead of one per persisted routing
+    key.
+
+    Its own generous default timeout rather than
+    embedding_timeout_seconds: that setting is sized for ONE embedding
+    on the request path (where the fallback is just "call the routing
+    LLM as before", so waiting long only delays the inevitable); a
+    warmup batch is dozens of texts on a background thread where a few
+    extra seconds cost nothing and a premature timeout throws away an
+    otherwise-fine batch.
+
+    All-or-nothing per call, never raises: the sole caller treats None
+    as "skip this batch" and decides for itself whether to keep going.
+    """
+    if not embeddings_configured() or not texts:
+        return None
+    base_url = settings.embedding_url or settings.llm_url
+    api_type = settings.llm_api_type.lower().strip()
+    try:
+        if api_type == "openai":
+            resp = _session.post(
+                f"{base_url}/v1/embeddings",
+                json={"model": settings.embedding_model, "input": texts},
+                timeout=timeout,
+            )
+            resp.raise_for_status()
+            data = resp.json().get("data", [])
+            vectors = [item.get("embedding") for item in data]
+        else:
+            resp = _session.post(
+                f"{base_url}/api/embed",
+                json={"model": settings.embedding_model, "input": texts},
+                timeout=timeout,
+            )
+            resp.raise_for_status()
+            vectors = resp.json().get("embeddings", [])
+        if len(vectors) != len(texts) or any(not v or not isinstance(v, list) for v in vectors):
+            _LOGGER.warning(
+                "Batch embedding response shape mismatch: %d texts -> %d vectors (model=%s)",
+                len(texts), len(vectors), settings.embedding_model,
+            )
+            return None
+        return [[float(x) for x in v] for v in vectors]
+    except Exception as e:
+        _LOGGER.warning("Batch embedding call failed (%s): %s", api_type, e)
+        return None

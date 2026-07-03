@@ -324,3 +324,120 @@ class TestLlmDetectIntegration:
         assert len(semantic_events) == 1
         assert semantic_events[0]["matched_query"] == "will it rain later"
         assert semantic_events[0]["similarity"] >= 0.999
+
+
+class TestWarmup:
+    """Tests for the startup warmup — semantic_routing.warm() plus
+    router.warm_semantic_routing_cache()'s key filtering. The store is
+    deliberately in-memory only; the warmup re-embeds the routing
+    cache's PERSISTED queries after a restart so rephrasings match
+    immediately instead of only after each query is re-decided once."""
+
+    def setup_method(self):
+        from app.router import clear_routing_cache
+        self._save_patch = patch("app.router._save_routing_cache")
+        self._save_patch.start()
+        clear_routing_cache()
+        _configure()
+        _reset()
+
+    def teardown_method(self):
+        from app.router import clear_routing_cache
+        clear_routing_cache()
+        self._save_patch.stop()
+        _deconfigure()
+        settings.semantic_cache_max_size = 500
+        settings.semantic_warmup_enabled = True
+
+    def test_warms_only_live_source_keys(self):
+        """Only 'source:' entries are semantic-match candidates — book
+        selections and disambiguation candidates in the same routing
+        cache must never be embedded — and only LIVE ones: an entry
+        past ROUTING_CACHE_TTL would waste a slot on a candidate
+        find_similar() immediately skips."""
+        import time
+        import app.router as router
+        router._set_routing("source:will it rain later", "forecast")
+        router._set_routing("source:door status", "ha")
+        router._set_routing("book:mercury", "wikipedia")
+        router._set_routing("disambig_candidates:mercury", "a,b,c")
+        # Manufacture an expired source entry directly
+        router._routing_cache["source:ancient query"] = (
+            "web", time.time() - router.ROUTING_CACHE_TTL - 10,
+        )
+        with patch("app.semantic_routing.embed_batch",
+                   return_value=[[1.0, 0.0], [0.0, 1.0]]) as mock_batch:
+            stored = router.warm_semantic_routing_cache()
+        assert stored == 2
+        warmed_texts = mock_batch.call_args[0][0]
+        assert set(warmed_texts) == {"will it rain later", "door status"}
+        assert "ancient query" not in semantic_routing._store
+
+    def test_warmed_entry_actually_matches_a_rephrasing(self):
+        """End to end: a warmed embedding must behave identically to a
+        lazily-stored one — the whole point is restoring pre-restart
+        matching ability."""
+        import app.router as router
+        router._set_routing("source:will it rain later", "forecast")
+        with patch("app.semantic_routing.embed_batch", return_value=[[1.0, 0.0]]):
+            router.warm_semantic_routing_cache()
+        with patch("app.semantic_routing.embed", return_value=[1.0, 0.0]):
+            match, _ = semantic_routing.find_similar(
+                "will it rain this evening", lambda q: "forecast"
+            )
+        assert match is not None
+        assert match.matched_query == "will it rain later"
+
+    def test_newest_entries_win_when_over_capacity(self):
+        """More persisted queries than free slots: the most recently
+        decided ones — the likeliest to be rephrased soon — must get
+        the embeddings."""
+        settings.semantic_cache_max_size = 2
+        entries = [("oldest", 100.0), ("middle", 200.0), ("newest", 300.0)]
+        with patch("app.semantic_routing.embed_batch",
+                   return_value=[[1.0, 0.0], [0.0, 1.0]]) as mock_batch:
+            stored = semantic_routing.warm(entries)
+        assert stored == 2
+        assert mock_batch.call_args[0][0] == ["newest", "middle"]
+
+    def test_already_present_keys_are_not_reembedded(self):
+        with patch("app.semantic_routing.embed", return_value=[1.0, 0.0]):
+            semantic_routing.store("already here")
+        with patch("app.semantic_routing.embed_batch",
+                   return_value=[[0.0, 1.0]]) as mock_batch:
+            stored = semantic_routing.warm([("already here", 100.0), ("fresh", 200.0)])
+        assert stored == 1
+        assert mock_batch.call_args[0][0] == ["fresh"]
+
+    def test_failed_batch_aborts_cleanly(self):
+        """A batch failure means the backend is down or the model isn't
+        pulled — every subsequent batch would fail identically, so the
+        warmup must stop, keep whatever it stored, and leave lazy
+        population as the path forward. Never raises."""
+        entries = [(f"query {i}", float(i)) for i in range(80)]  # 3 batches of 32
+        responses = [
+            [[1.0, 0.0]] * 32,   # batch 1 succeeds
+            None,                # batch 2 fails
+        ]
+        with patch("app.semantic_routing.embed_batch", side_effect=responses) as mock_batch:
+            stored = semantic_routing.warm(entries)
+        assert stored == 32
+        assert mock_batch.call_count == 2  # never attempted batch 3
+
+    def test_disabled_warmup_is_a_noop(self):
+        import app.router as router
+        settings.semantic_warmup_enabled = False
+        router._set_routing("source:will it rain later", "forecast")
+        with patch("app.semantic_routing.embed_batch") as mock_batch:
+            stored = router.warm_semantic_routing_cache()
+        assert stored == 0
+        mock_batch.assert_not_called()
+
+    def test_unconfigured_embeddings_is_a_noop(self):
+        import app.router as router
+        settings.embedding_model = ""
+        router._set_routing("source:will it rain later", "forecast")
+        with patch("app.semantic_routing.embed_batch") as mock_batch:
+            stored = router.warm_semantic_routing_cache()
+        assert stored == 0
+        mock_batch.assert_not_called()

@@ -392,6 +392,18 @@ class Settings(BaseSettings):
     # serve a decision the routing cache itself no longer stands
     # behind.
     semantic_cache_max_size: int = 500
+    # Re-embed the routing cache's persisted "source:" queries in a
+    # background thread at startup, restoring the semantic store's full
+    # pre-restart matching ability (the store itself is deliberately
+    # in-memory only — see the persistence rationale in
+    # app/semantic_routing.py — but routing_cache.json persists, so
+    # only the vectors need rebuilding, batched into a handful of
+    # requests). Never blocks startup; a failed batch just falls back
+    # to the normal lazy through-use population. Only relevant when
+    # EMBEDDING_MODEL is set. Off switch exists for deployments where
+    # the embedding backend is slow to come up after a reboot and the
+    # warmup's failure warnings would be noise.
+    semantic_warmup_enabled: bool = True
 
     # -------------------------------------------------------------------
     # Caching — result cache, routing cache, and per-source TTLs

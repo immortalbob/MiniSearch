@@ -710,6 +710,49 @@ def get_routing_cache_stats() -> list[dict]:
     return entries
 
 
+
+def warm_semantic_routing_cache() -> int:
+    """Hand the routing cache's live "source:" entries to the semantic
+    store's startup warmup — see semantic_routing.warm() for the full
+    rationale. Returns how many embeddings were stored.
+
+    This function owns exactly the two things only the router can know:
+    which routing-cache keys are query-shaped intent decisions (the
+    "source:" prefix — book selections, disambiguation candidates, and
+    alternate phrasings are also in the cache but aren't semantic-match
+    candidates), and which of those are still LIVE against
+    ROUTING_CACHE_TTL right now — warming an expired entry would waste
+    a slot on a candidate find_similar() immediately skips.
+
+    Called from main.py's lifespan on a daemon thread; also guarded
+    here (not just at the call site) so tests and any future callers
+    get the same no-op-when-disabled behavior for free.
+    """
+    from app.llm import embeddings_configured
+    if not settings.semantic_warmup_enabled or not embeddings_configured():
+        return 0
+    now = time.time()
+    # list() — a stable snapshot, NOT a live view: this runs on a
+    # background thread while request traffic is already being served,
+    # and iterating a dict another thread is inserting into raises
+    # RuntimeError mid-scan. Same snapshot discipline
+    # semantic_routing.find_similar() already applies to its own store.
+    live_source_entries = [
+        (key[len("source:"):], ts)
+        for key, (_decision, ts) in list(_routing_cache.items())
+        if key.startswith("source:") and now - ts < ROUTING_CACHE_TTL
+    ]
+    if not live_source_entries:
+        return 0
+    stored = semantic_routing.warm(live_source_entries)
+    if stored:
+        _LOGGER.info(
+            "Semantic routing cache warmed: %d of %d persisted routing "
+            "queries re-embedded", stored, len(live_source_entries),
+        )
+    return stored
+
+
 def clear_routing_cache() -> int:
     """Clear all routing cache entries. Returns count removed."""
     global _routing_dirty_count

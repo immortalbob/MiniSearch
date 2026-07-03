@@ -4,6 +4,27 @@ All notable changes to Mnemolis are documented here, from v3.45.0 onward. For ev
 
 ---
 
+## [3.54.0]
+
+### Added — Semantic Cache Startup Warmup
+
+The semantic routing store is deliberately in-memory only (design constraint 3 — persisting float vectors would mean a new on-disk format, model-change versioning, and staleness coupling with routing_cache.json), which meant every container restart put rephrasings back on the cold LLM path until the store lazily repopulated. But `routing_cache.json` PERSISTS — the queries and decisions survive the restart; only the vectors were missing. A background daemon thread at startup now re-embeds the routing cache's just-loaded `source:` queries, restoring the full pre-restart matching ability in seconds without persisting a single vector.
+
+Mechanics: new `llm.embed_batch()` (one HTTP round trip per batch of 32 — both backends accept list input natively — with its own generous timeout, since a background batch shouldn't be governed by the request path's deliberately short `EMBEDDING_TIMEOUT_SECONDS`); new `semantic_routing.warm()` (newest-decided first when there are more persisted queries than free slots, skips already-present keys, one failed batch aborts with a warning since every subsequent batch would fail identically — and a partial store is exactly the state lazy population already handles); new `router.warm_semantic_routing_cache()` owning the two things only the router knows (which cache keys are `source:` intent decisions vs book/disambiguation entries, and which are still live against `ROUTING_CACHE_TTL` — warming an expired entry would waste a slot on a candidate `find_similar()` immediately skips). Started as a daemon thread from the lifespan — deliberately NOT an awaited executor call like the cache loads, since the warmup must never delay startup and talks to a backend that may itself still be booting after a host restart. New setting `SEMANTIC_WARMUP_ENABLED` (default true). 7 new tests, including the live-TTL/`source:`-only filtering, newest-first capacity handling, failed-batch abort, and an end-to-end warmed-entry-matches-a-rephrasing check.
+
+One real bug caught during this work, before it ever shipped: the warmup's first draft iterated `_routing_cache.items()` directly — a live dict view, scanned on a background thread while request traffic is already inserting into that same dict, which raises `RuntimeError: dictionary changed size during iteration` mid-scan. Fixed with the same `list()`-snapshot discipline `semantic_routing.find_similar()` already applies to its own store.
+
+### Added — Semantic-Rephrase Benchmark Pool
+
+The benchmark suite now measures the feature v3.53.0 shipped: new `SEMANTIC_REPHRASE_TOPICS` locustfile pool — six topics, several colloquial rephrasings each — under its own `/search [semantic_rephrase]` name, so a cold run's per-endpoint table directly shows the semantic cache's latency win against `[auto]`'s (first phrasing of a topic pays the LLM, later phrasings should land `intent_semantic` reuses). Phrasings deliberately include the apostrophe-less colloquial forms ("whats the story with") the v3.53.1 term-building fix covers, so a regression in either feature shows up in the same bucket. Against a deployment without `EMBEDDING_MODEL` it degrades to plain extra auto-shaped load — harmless, just not informative.
+
+### Changed
+- `wiki/Home.md` now links every wiki page: [Semantic Routing Cache](https://github.com/immortalbob/Mnemolis/wiki/Semantic-Routing-Cache) added under Core Concepts (after Caching) and [Explanation Chains](https://github.com/immortalbob/Mnemolis/wiki/Explanation-Chains) under Operations (after Health & Observability), each with a description in the page's established style; audited both directions (no unlinked pages, no dead links).
+- `wiki/Semantic-Routing-Cache.md` design constraint 3 rewritten for the warmup ("in-memory only — but warmed at startup, not just rebuilt through use"); `wiki/Caching.md` and `wiki/Configuration-Reference.md` updated to match.
+- Version bumped to 3.54.0. Test suite: 1447 passing (from 1440 at v3.53.1), ruff clean.
+
+---
+
 ## [3.53.1]
 
 ### Fixed — The "Love Story (1944 film)" Incident: Colloquial Framings Now Strip as Whole Phrases
