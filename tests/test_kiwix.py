@@ -221,11 +221,77 @@ class TestSearchTermCleaning:
         assert "'" not in result
 
     def test_colloquial_filler_words_stripped(self):
-        """'deal', 'thing', 'keep', 'hearing' are filler in casual phrasing
-        and should be stripped just like formal stop words, leaving only
-        the actual topic word(s)."""
+        """'thing' is safe unconditional filler; 'keep hearing about' is
+        stripped as a whole phrase (COLLOQUIAL_QUESTION_PHRASES) rather
+        than word-by-word — 'deal', 'keep', and 'hearing' used to be
+        bare _STOP_WORDS entries, which silently broke queries where
+        those words WERE the topic (see the New Deal / hearing aid
+        regression tests below). Either way, casual phrasing must still
+        reduce to the actual topic word."""
         result = self.clean("that mercury thing I keep hearing about")
         assert result.strip() == "mercury"
+
+    def test_story_framing_stripped_no_apostrophe(self):
+        """Regression test for the real, live bad result that shipped
+        explanation chains their first find: 'whats the story with
+        molybdenum' returned 'Love Story (1944 film)' — a movie whose
+        plot mentions molybdenum mining — because of TWO independent
+        leaks confirmed by direct execution. (1) 'whats' (as really
+        typed, no apostrophe) isn't caught by the contraction-
+        normalizing regex, wasn't a stop word, and _stem() — which runs
+        AFTER stop-word filtering — turned it into a literal 'what'
+        search term. (2) 'story' was never stripped at all: the
+        colloquial handling was word-level ('deal' was a stop word,
+        'story' never was). The search Kiwix actually received was
+        'what story molybdenum'."""
+        assert self.clean("whats the story with molybdenum") == "molybdenum"
+
+    def test_story_framing_stripped_with_apostrophe(self):
+        assert self.clean("what's the story with molybdenum") == "molybdenum"
+
+    def test_story_framing_stripped_spelled_out(self):
+        assert self.clean("what is the story with molybdenum") == "molybdenum"
+
+    def test_deal_framing_stripped_no_apostrophe(self):
+        """The no-apostrophe 'whats' leak applied to the deal framing
+        too — this produced 'what mercury' before the fix."""
+        assert self.clean("whats the deal with mercury") == "mercury"
+
+    def test_new_deal_survives_as_a_topic(self):
+        """Regression test for a real latent bug the word-level approach
+        created, confirmed by direct execution: with 'deal' as a bare
+        stop word, 'what is the new deal' reduced to the literal Kiwix
+        search 'new' — losing the one word that carried the topic. The
+        phrase-level strip only fires when the whole colloquial framing
+        is present, so a query ABOUT the New Deal keeps both words."""
+        result = self.clean("what is the new deal")
+        assert "new" in result.split()
+        assert "deal" in result.split()
+
+    def test_hearing_aid_survives_as_a_topic(self):
+        """Same latent-bug class as the New Deal case: 'hearing' as a
+        bare stop word reduced 'what is a hearing aid' to the literal
+        search 'aid'. ('hearing' stems to 'hear', which is correct
+        stemming behavior, not a leak.)"""
+        result = self.clean("what is a hearing aid")
+        assert "hear" in result.split()
+        assert "aid" in result.split()
+
+    def test_up_quark_survives_as_a_topic(self):
+        """'up' was also a bare stop word from the same colloquial
+        batch; 'what is up with' is now a stripped phrase instead, so
+        'up' only disappears when it's genuinely part of that framing —
+        never when it's half of the topic."""
+        result = self.clean("what is up with the up quark")
+        assert "up" in result.split()
+        assert "quark" in result.split()
+
+    def test_whats_no_apostrophe_never_becomes_a_search_term(self):
+        """The 'whats' → _stem() → 'what' leak, pinned directly across
+        framings that aren't full stripped phrases."""
+        result = self.clean("whats a good multimeter")
+        assert "what" not in result.split()
+        assert "whats" not in result.split()
 
     def test_discourse_framing_phrase_stripped_bitcoin(self):
         """Regression test — the real bug found via real usage. Once
@@ -586,3 +652,53 @@ class TestScoreResultDiscourseFramingWordsExcluded:
         ]
         for q in ordinary_queries:
             assert _strip_discourse_framing(q.lower().strip()) == q.lower().strip()
+
+
+class TestScoreResultColloquialFramingExcluded:
+    """Scoring-side twin of the search-term colloquial strip — the film
+    incident needed BOTH halves fixed, since 'Love Story (1944 film)'
+    earned its winning points from 'story' matching in _score_result()'s
+    title overlap, not just from the polluted search terms."""
+
+    def _result(self, title, excerpt="", book="wikipedia_en_all_maxi_2026-02"):
+        return {"title": title, "excerpt": excerpt, "book": book}
+
+    def test_love_story_film_loses_to_molybdenum_article(self):
+        """The exact live incident, pinned: under 'whats the story with
+        molybdenum', the element article must beat the film. Confirmed
+        against the pre-fix code that the film genuinely won this
+        comparison via 'story' title-match points."""
+        from app.sources.kiwix import _score_result
+        q = "whats the story with molybdenum"
+        book = "wikipedia_en_all_maxi_2026-02"
+        film = self._result("Love Story (1944 film)", excerpt="much-needed molybdenum")
+        element = self._result("Molybdenum", excerpt="chemical element with symbol Mo")
+        assert _score_result(element, q, book) > _score_result(film, q, book)
+
+    def test_story_earns_no_title_points_when_it_is_framing(self):
+        """Two identical-relevance candidates differing only in whether
+        their title contains the framing word 'story' must score the
+        same — 'story' contributes nothing once stripped."""
+        from app.sources.kiwix import _score_result
+        q = "whats the story with cold fusion"
+        book = "wikipedia_en_all_maxi_2026-02"
+        with_story = self._result("Cold fusion story")
+        without_story = self._result("Cold fusion overview")
+        # 'overview' and 'story' are both non-query words after the
+        # strip; neither should differentiate.
+        assert _score_result(with_story, q, book) == _score_result(without_story, q, book)
+
+    def test_definitional_detection_still_sees_the_original_phrasing(self):
+        """_is_definitional_query() deliberately receives the FULL
+        original query, not the stripped one — 'whats the story with X'
+        is definitional precisely BECAUSE of its leading phrase, so the
+        strip must never run before that check. Pinned via the
+        Wikipedia bonus, which is +8 definitional vs +3 otherwise: the
+        colloquial phrasing must land the same score a formal
+        definitional phrasing gets."""
+        from app.sources.kiwix import _score_result
+        book = "wikipedia_en_all_maxi_2026-02"
+        result = self._result("Molybdenum")
+        colloquial = _score_result(result, "whats the story with molybdenum", book)
+        formal = _score_result(result, "what is molybdenum", book)
+        assert colloquial == formal

@@ -28,6 +28,24 @@ services:
       FRESHRSS_API_PASSWORD: ""       # your FreshRSS API password (Profile → API password)
       FRESHRSS_MAX_ARTICLES: "10"
       SEARXNG_URL: "http://searxng:8080"
+      # LLM — source routing, Kiwix book selection, disambiguation.
+      # Point at any Ollama instance reachable from this container
+      # (typically a separate GPU machine, not this docker host).
+      # Leave LLM_URL blank to run without an LLM: keyword routing
+      # still works, everything else falls back to kiwix.
+      LLM_URL: ""                     # e.g. http://192.168.1.20:11434
+      LLM_MODEL: "qwen3:8b"
+      LLM_API_TYPE: "ollama"          # "ollama" (native) or "openai" (OpenAI-compatible)
+      LLM_KEEP_ALIVE: "5m"            # how long Ollama keeps the model in VRAM after the last call
+      # Semantic routing cache (optional) — reuses routing decisions
+      # across rephrasings of the same question, skipping the cold LLM
+      # routing call. Requires an embedding model on the LLM backend:
+      #   docker exec ollama ollama pull nomic-embed-text
+      # Leave EMBEDDING_MODEL blank to disable the feature entirely.
+      # See https://github.com/immortalbob/Mnemolis/wiki/Semantic-Routing-Cache
+      EMBEDDING_MODEL: ""             # e.g. nomic-embed-text
+      EMBEDDING_URL: ""               # blank = same as LLM_URL
+      SEMANTIC_ROUTING_THRESHOLD: "0.92"  # cosine-similarity floor; tune only after auditing with explain=true
       FORECAST_LATITUDE: ""           # your latitude (e.g. 40.7128)
       FORECAST_LONGITUDE: ""          # your longitude (e.g. -74.0060)
       FORECAST_LOCATION_NAME: ""      # e.g. "New York, NY"

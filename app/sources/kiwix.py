@@ -383,11 +383,33 @@ _STOP_WORDS = {
     "you", "your", "he", "she", "it", "they", "them", "their",
     "tell", "explain", "describe", "define", "give", "show", "find",
     "get", "how", "why", "when", "where",
-    # Colloquial filler — "what's the deal with X", "what's up with X thing",
-    # "X thing I keep hearing about" all reduce to the bare topic word once
-    # these are stripped, same as more formal phrasing already handles
-    "deal", "thing", "things", "stuff", "keep", "hearing", "hear", "heard",
-    "up", "going",
+    # Colloquial filler — only words that are SAFE as unconditional
+    # filler stay here. "deal", "keep", "hear/heard/hearing", and "up"
+    # used to be in this set (added for "what's the deal with X" / "X
+    # thing I keep hearing about"), and that word-level approach was a
+    # real bug factory, confirmed by direct execution: "what is the New
+    # Deal" reduced to the literal search "new", and "what is a hearing
+    # aid" reduced to "aid" — each losing the one word that carried the
+    # topic. Those phrasings are now handled by whole-phrase stripping
+    # (COLLOQUIAL_QUESTION_PHRASES below), the exact surgical approach
+    # DISCOURSE_FRAMING_PATTERNS' own comment already argued for; only
+    # the genuinely-never-a-topic fillers remain as bare words.
+    "thing", "things", "stuff", "going",
+    # Apostrophe-LESS contractions — found via real usage (the "Love
+    # Story (1944 film)" incident, see The Discourse-Framing
+    # Investigation's postscript): the contraction-normalizing regex in
+    # _build_search_terms() only fires on an actual apostrophe, so
+    # "whats" (as really typed) survived the "what" stop word, then
+    # _stem() — which runs AFTER stop-word filtering — turned it into a
+    # literal "what" search term. Same class for the rest of these:
+    # each is the apostrophe-less spelling of a contraction whose
+    # apostrophe form already normalizes to an existing stop word.
+    # Deliberately excludes real-topic homographs ("id" — Freud, id
+    # Software; "im" — instant messaging).
+    "whats", "hows", "whos", "wheres", "whens", "whys", "thats", "its",
+    "theres", "heres", "lets", "youre", "theyre",
+    "dont", "doesnt", "didnt", "isnt", "arent", "wasnt", "werent",
+    "cant", "wont", "couldnt", "shouldnt", "wouldnt",
 }
 
 # Phrases signaling that a query frames its (possibly encyclopedic) topic
@@ -425,6 +447,61 @@ def _strip_discourse_framing(query: str) -> str:
     result = query
     result_lower = result.lower()
     for phrase in DISCOURSE_FRAMING_PATTERNS:
+        idx = result_lower.find(phrase)
+        if idx != -1:
+            result = result[:idx] + result[idx + len(phrase):]
+            result_lower = result.lower()
+    return result
+
+
+# Colloquial question framings stripped as WHOLE PHRASES before search
+# terms are built and before result scoring — "what's the story with X"
+# is a question about X, and "story" must never become a literal search
+# or scoring term. Found via real usage on day one of explanation
+# chains: "whats the story with molybdenum" returned "Love Story (1944
+# film)" — a movie whose plot happens to mention molybdenum mining —
+# because "story" leaked into the search terms AND earned the film
+# title-match points during scoring, out-competing the actual
+# Molybdenum article.
+#
+# Phrase-level, not word-level, deliberately: this is the identical
+# lesson DISCOURSE_FRAMING_PATTERNS' own comment documents, re-learned
+# the hard way. The previous approach put "deal", "keep", "hearing",
+# and "up" into _STOP_WORDS as bare words, which silently broke every
+# query where those words WERE the topic — confirmed directly: "what is
+# the New Deal" searched Kiwix for the literal term "new", and "what is
+# a hearing aid" searched for "aid". A phrase only fires when the whole
+# colloquial framing is genuinely present.
+#
+# Three spelling variants per framing (apostrophe, apostrophe-less,
+# spelled-out "what is") because all three occur in real typed queries
+# — the apostrophe-less form is what actually triggered the film
+# incident. Overlaps with router.py's _COLLOQUIAL_PHRASES and this
+# module's own _DEFINITIONAL_PATTERNS are intentional but the lists
+# serve different jobs (decomposition meaningfulness, definitional
+# detection, term stripping) and are deliberately not unified — see
+# each list's own comment.
+COLLOQUIAL_QUESTION_PHRASES = (
+    "what's the story with", "whats the story with", "what is the story with",
+    "what's the story behind", "whats the story behind", "what is the story behind",
+    "what's the deal with", "whats the deal with", "what is the deal with",
+    "what's up with", "whats up with", "what is up with",
+    "what's this about", "whats this about", "what is this about",
+    "what's going on with", "whats going on with", "what is going on with",
+    "i keep hearing about", "keeps hearing about", "keep hearing about",
+)
+
+
+def _strip_colloquial_phrases(query: str) -> str:
+    """Remove any matched colloquial question framing from the query —
+    same mechanism as _strip_discourse_framing(), same reason. Applied
+    in BOTH _build_search_terms() (what gets sent to Kiwix) and
+    _score_result()'s scoring query (what results get graded against);
+    the film incident above needed the phrase gone from both places,
+    since "story" polluted the search AND the title scoring."""
+    result = query
+    result_lower = result.lower()
+    for phrase in COLLOQUIAL_QUESTION_PHRASES:
         idx = result_lower.find(phrase)
         if idx != -1:
             result = result[:idx] + result[idx + len(phrase):]
@@ -526,13 +603,19 @@ def _score_result(result: dict, query: str, primary_book: str) -> int:
     book = result.get("book", "")
 
     # Strip discourse-framing phrases ("everyone keeps talking about",
-    # "everyone's obsessed with") from the words actually used for
-    # keyword-overlap scoring below — NOT from query_lower itself, which
-    # stays the full, original phrasing for the exact/whole-string match
-    # checks just below and for _is_definitional_query() further down
-    # (genuinely needs the real leading phrase structure, e.g. "what's
-    # the deal with", which _strip_discourse_framing() doesn't touch and
-    # search_terms's stop-word stripping would destroy).
+    # "everyone's obsessed with") AND colloquial question framings
+    # ("what's the story with", "whats the deal with") from the words
+    # actually used for keyword-overlap scoring below — NOT from
+    # query_lower itself, which stays the full, original phrasing for
+    # the exact/whole-string match checks just below and for
+    # _is_definitional_query() further down (genuinely needs the real
+    # leading phrase structure, e.g. "what's the deal with", which
+    # these strips would remove and search_terms's stop-word stripping
+    # would destroy). The colloquial strip was added here alongside its
+    # _build_search_terms() twin after the "Love Story (1944 film)"
+    # incident — "whats the story with molybdenum" needed "story" gone
+    # from BOTH the search terms and this scoring set, since the film
+    # earned its winning title-match points right here.
     #
     # Found via tracing a real, live bad result: The Discourse-Framing
     # Investigation's own fix only ever called _strip_discourse_framing()
@@ -551,7 +634,7 @@ def _score_result(result: dict, query: str, primary_book: str) -> int:
     # unrelated podcast Wikipedia article both outscored the real,
     # correct Black Hole article, in part because "everyone"/"keeps"/
     # "talking" never got excluded from real scoring at all.
-    scoring_query_lower = _strip_discourse_framing(query_lower)
+    scoring_query_lower = _strip_colloquial_phrases(_strip_discourse_framing(query_lower))
 
     # Strip stop words from query for word-level scoring
     query_words = set(scoring_query_lower.split()) - _STOP_WORDS
@@ -801,6 +884,7 @@ def _build_search_terms(query: str) -> str:
     reintroducing that noise.
     """
     query = _strip_discourse_framing(query)
+    query = _strip_colloquial_phrases(query)
     normalized_words = [
         re.sub(r"['']\w*$", "", w) for w in query.lower().split()
     ]

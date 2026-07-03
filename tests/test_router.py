@@ -988,13 +988,23 @@ class TestDecomposeStopWordOnlyKeywordPhrases:
         intents = {p: detect_intent(p) for p in parts}
         assert intents["is it up"] == "uptime"
 
-    def test_only_two_real_keyword_phrases_are_stop_word_only(self):
-        """Documents and locks in the actual scope of the real gap this
-        fix closes — confirms exactly which two phrases (out of all
-        113 real INTENT_MAP keywords) are vulnerable, so a future
-        change to INTENT_MAP that introduces a THIRD all-stop-word
-        phrase is still automatically covered by the general fix, not
-        silently missed the way the original bug was."""
+    def test_no_keyword_phrase_is_currently_stop_word_only(self):
+        """Documents and locks in the CURRENT scope of the gap the
+        INTENT_MAP-aware safety net in _filter_meaningful() covers.
+        When that fix landed, exactly two of the 113 real INTENT_MAP
+        keyword phrases ("is it up", "are they up") were made entirely
+        of stop words — pinned by an earlier version of this test. The
+        v3.53.1 colloquial-phrase rework then removed "up" from
+        kiwix._STOP_WORDS (it had silently broken queries where "up"
+        WAS the topic — "what is up with the up quark" lost half its
+        subject; see COLLOQUIAL_QUESTION_PHRASES' own comment), which
+        gave both phrases a real content word and emptied the
+        vulnerable set entirely. The safety net deliberately stays: it
+        exists precisely so a future INTENT_MAP addition (or stop-word
+        change) that produces a stop-word-only phrase again is
+        automatically covered rather than silently discarded the way
+        the original bug was — this audit just keeps an honest,
+        current census of how many phrases actually need it."""
         from app.router import INTENT_MAP
         from app.sources import kiwix
         import re as re_module
@@ -1006,7 +1016,7 @@ class TestDecomposeStopWordOnlyKeywordPhrases:
                 content_words = [w for w in words if w not in kiwix._STOP_WORDS and len(w) > 1]
                 if not content_words:
                     vulnerable.append(kw)
-        assert set(vulnerable) == {"is it up", "are they up"}
+        assert set(vulnerable) == set()
 
     def test_unrelated_decomposition_behavior_unaffected(self):
         """Sanity check: ordinary decomposition of queries with no

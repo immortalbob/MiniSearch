@@ -4,6 +4,30 @@ All notable changes to Mnemolis are documented here, from v3.45.0 onward. For ev
 
 ---
 
+## [3.53.1]
+
+### Fixed — The "Love Story (1944 film)" Incident: Colloquial Framings Now Strip as Whole Phrases
+
+Explanation chains' very first real-world trace caught a live Kiwix bug: *"whats the story with molybdenum"* returned **Love Story (1944 film)** — a movie whose plot happens to involve molybdenum mining — instead of the element. The chain showed routing was correct (`intent_llm → kiwix`), isolating the failure to Kiwix's own search in about a minute. Two independent leaks, both confirmed by direct execution:
+
+1. **`"whats"` (no apostrophe) leaked a literal `"what"` into the search terms.** The contraction-normalizing regex in `_build_search_terms()` only fires on an actual apostrophe; `"whats"` wasn't a stop word; and `_stem()` runs *after* stop-word filtering, so it stemmed the survivor into `"what"` on the way out. Fixed by adding the apostrophe-less contraction forms (`whats`, `hows`, `whos`, `wheres`, `thats`, `its`, `dont`, `cant`, …) to `_STOP_WORDS` directly — deliberately excluding real-topic homographs (`id`, `im`).
+2. **`"story"` was never stripped at all.** The colloquial-question handling was *word*-level (`"deal"`, `"keep"`, `"hearing"`, `"up"` as bare `_STOP_WORDS` entries), and `"story"` wasn't among them. The search Kiwix actually received was `what story molybdenum`, and the film earned its winning points from `"story"` in both the search terms AND `_score_result()`'s title overlap.
+
+The fix re-applies the lesson `DISCOURSE_FRAMING_PATTERNS`' own comment already documented: **strip whole phrases, not individual meaningful words.** New `COLLOQUIAL_QUESTION_PHRASES` removes `"what's the story with"` / `"whats the deal with"` / `"what is up with"` / `"keep hearing about"` and variants (apostrophe, apostrophe-less, and spelled-out forms — the apostrophe-less form is what actually triggered the incident) as units, applied in both `_build_search_terms()` and `_score_result()`'s scoring set. `_is_definitional_query()` still deliberately receives the original phrasing — those leading phrases are precisely what make such queries definitional, pinned by a test asserting the colloquial phrasing scores identically to formal "what is X".
+
+Auditing the retired word-level entries found they'd been silently breaking every query where those words WERE the topic, confirmed directly: *"what is the New Deal"* had been searching Kiwix for the literal term `new`, and *"what is a hearing aid"* for `aid`, and *"what is up with the up quark"* lost half its subject. `"deal"`, `"keep"`, `"hear"/"heard"/"hearing"`, and `"up"` are no longer stop words; regression tests pin New Deal, hearing aid, and up quark surviving as topics. A knock-on: with `"up"` restored as a content word, zero INTENT_MAP keyword phrases are stop-word-only anymore (previously exactly two: "is it up", "are they up") — the `_filter_meaningful()` safety net deliberately stays for future additions, and its census test now pins the empty set with the full story.
+
+11 new term-building tests + 3 new scoring tests, including the exact live incident pinned end to end (the element must out-score the film under the original query — confirmed the film genuinely won before the fix, 15 vs 40 after). `wiki/The-Discourse-Framing-Investigation.md` gained a postscript, including the operational note that a bad result from this bug persists in the result cache under its exact phrasing until the kiwix TTL — `POST /cache/clear` after deploying.
+
+### Changed — docker-compose.example.yml Gained the LLM and Embedding Sections
+
+The example compose file never had the LLM settings at all (`LLM_URL`, `LLM_MODEL`, `LLM_API_TYPE`, `LLM_KEEP_ALIVE`), and v3.53.0's embedding settings weren't added either — a fresh GitHub deployment following the example got keyword-only routing with no hint the LLM or semantic layers existed. Both sections added with the same inline-comment guidance style as the rest of the file, including the `docker exec ollama ollama pull nomic-embed-text` one-liner and a pointer to the Semantic Routing Cache wiki page.
+
+### Changed
+- Version bumped to 3.53.1. Test suite: 1440 passing (from 1429 at v3.53.0), ruff clean.
+
+---
+
 ## [3.53.0]
 
 ### Added — Semantic Routing Cache
