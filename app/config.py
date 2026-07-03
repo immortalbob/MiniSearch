@@ -345,6 +345,55 @@ class Settings(BaseSettings):
     decompose_max_parallel: int = 4
 
     # -------------------------------------------------------------------
+    # Semantic routing cache — embedding-based reuse of routing decisions
+    # -------------------------------------------------------------------
+    # The one performance frontier left after the v3.50.x latency
+    # campaign: a cold LLM routing call costs ~200-700ms on this
+    # project's own reference hardware, and the exact-match routing
+    # cache can't see that "will it rain later" and "will it rain this
+    # evening" are the same routing decision. With an embedding model
+    # configured, a routing-cache miss first embeds the query (~one
+    # small POST on llm.py's existing connection pool) and compares it
+    # against embeddings of previously-decided queries; a match above
+    # the similarity threshold reuses that decision and skips the LLM
+    # entirely. See wiki/Semantic-Routing-Cache.md for the full design.
+    #
+    # EMBEDDING_MODEL empty (the default) disables the whole feature
+    # with zero behavior change — routing/completion and embeddings are
+    # independent capabilities, and a fresh GitHub deployment shouldn't
+    # pay a failed HTTP call per cold decision for a model that was
+    # never pulled. On Ollama, `ollama pull nomic-embed-text` (or
+    # all-minilm, mxbai-embed-large) then set EMBEDDING_MODEL to match.
+    embedding_model: str = ""
+    # Empty = use LLM_URL (the normal case: same Ollama instance serves
+    # both). Set only if embeddings live on a different backend.
+    embedding_url: str = ""
+    # Deliberately short — an embedding is a tiny fraction of a
+    # completion's cost, and the fallback on timeout is just "do what
+    # v3.52.0 did" (call the routing LLM), so waiting long here only
+    # delays the path that was about to run anyway.
+    embedding_timeout_seconds: int = 5
+    # Cosine-similarity floor for reusing another query's routing
+    # decision. Deliberately conservative: a wrong reuse silently
+    # routes a query to the wrong source, which is strictly worse than
+    # the ~200-700ms LLM call it saved. 0.92 was chosen as a floor
+    # where rephrasing ("will it rain later" / "will it rain this
+    # evening") clears it but topic-adjacent-yet-different intents
+    # ("is it raining" / "is my network down") do not, for typical
+    # sentence-embedding models. Tune DOWN cautiously and only after
+    # watching /cache/semantic for near-miss pairs on your own real
+    # traffic; tune UP if you ever catch a wrong reuse.
+    semantic_routing_threshold: float = 0.92
+    # Max stored (query -> embedding) entries before oldest-eviction —
+    # the same bounded-eviction pattern both other caches use. Sized to
+    # the routing cache's own "source:" key population; entries whose
+    # underlying routing-cache decision has expired are skipped at
+    # match time and pruned opportunistically, so this store can never
+    # serve a decision the routing cache itself no longer stands
+    # behind.
+    semantic_cache_max_size: int = 500
+
+    # -------------------------------------------------------------------
     # Caching — result cache, routing cache, and per-source TTLs
     # -------------------------------------------------------------------
     # Result cache — max entries before oldest-eviction kicks in.

@@ -12,6 +12,7 @@ from contextlib import contextmanager, closing
 from typing import Callable, NamedTuple
 from app.sources import kiwix, forecast, freshrss, searxng, uptime_kuma, fusion, home_assistant
 from app.snapshots import get_changes, format_changes
+from app import semantic_routing
 from app.config import settings
 
 _LOGGER = logging.getLogger(__name__)
@@ -870,6 +871,7 @@ def _get_cached(source: str, query: str) -> str | None:
         if time.time() - timestamp < ttl:
             _LOGGER.info("Cache hit for source='%s' query='%s'", source, query[:50])
             _route_stat("served_any_from_cache", True)
+            _route_event("result_cache_hit", source=source, query=query)
             return result
         else:
             del _cache[key]
@@ -1234,6 +1236,7 @@ def _llm_detect(query: str) -> str | list[str]:
     if cached:
         result = _interpret_cached_source_decision(query, cached)
         if result is not None:
+            _route_event("intent_cached", query=query, decision=cached)
             return result
 
     with _singleflight(cache_key):
@@ -1245,9 +1248,51 @@ def _llm_detect(query: str) -> str | list[str]:
         if cached:
             result = _interpret_cached_source_decision(query, cached)
             if result is not None:
+                _route_event("intent_cached", query=query, decision=cached)
+                return result
+
+        # Semantic routing cache — before paying the LLM call, check
+        # whether a SEMANTICALLY equivalent query already has a live
+        # routing decision the exact-match cache can't see ("will it
+        # rain later" vs "will it rain this evening"). Sits inside the
+        # singleflight deliberately: concurrent identical queries still
+        # coordinate on one lookup, and a hit writes the exact-match
+        # entry below so every subsequent identical phrasing is a plain
+        # cache hit that never reaches this code at all. Every failure
+        # mode (feature off, embedding call failed, empty store, nothing
+        # above threshold) returns (None, maybe-vector) and falls
+        # through to exactly what v3.52.0 did — see the design
+        # constraints in app/semantic_routing.py's module docstring.
+        semantic_match, query_vector = semantic_routing.find_similar(
+            query, lambda q: _get_routing(f"source:{q}")
+        )
+        if semantic_match is not None:
+            result = _interpret_cached_source_decision(query, semantic_match.decision)
+            if result is not None:
+                _route_stat("semantic_routing_hit", True)
+                _route_event(
+                    "intent_semantic",
+                    query=query,
+                    matched_query=semantic_match.matched_query,
+                    similarity=round(semantic_match.similarity, 3),
+                    decision=semantic_match.decision,
+                )
+                _LOGGER.info(
+                    "Semantic routing reuse: '%s' -> %s (via '%s')",
+                    query[:50], semantic_match.decision, semantic_match.matched_query[:50],
+                )
+                # Promote to a normal exact-match entry so this precise
+                # phrasing never pays even the embedding call again, and
+                # make the new phrasing itself matchable for the NEXT
+                # rephrasing (the vector was already computed for the
+                # lookup — storing it is free).
+                _set_routing(cache_key, semantic_match.decision)
+                semantic_routing.store(query, query_vector)
                 return result
 
         if not is_configured():
+            _route_event("intent_default", query=query, decision="kiwix",
+                         reason="llm_not_configured")
             return "kiwix"
 
         source_list = "\n".join(
@@ -1281,6 +1326,12 @@ def _llm_detect(query: str) -> str | list[str]:
                 sources = _escalate_multi_source_for_discourse_framing(query, sources)
                 _LOGGER.info("LLM escalated to fusion: '%s' -> %s", query[:50], sources)
                 _set_routing(cache_key, ",".join(sources))
+                # Make this fresh decision semantically matchable —
+                # reuses the vector the lookup above already computed
+                # (or embeds now if the store was empty; either way the
+                # cold path pays at most ONE embedding call).
+                semantic_routing.store(query, query_vector)
+                _route_event("intent_llm", query=query, decision=",".join(sources))
                 return sources
             _LOGGER.warning("LLM returned multi-source but too few valid: '%s'", raw)
 
@@ -1294,13 +1345,22 @@ def _llm_detect(query: str) -> str | list[str]:
                     query[:50], escalated
                 )
                 _set_routing(cache_key, ",".join(escalated))
+                semantic_routing.store(query, query_vector)
+                _route_event("intent_llm", query=query, decision=",".join(escalated),
+                             discourse_escalated=True)
                 return escalated
             _LOGGER.info("LLM intent: '%s' -> %s", query[:50], chosen)
             _set_routing(cache_key, chosen)
+            # Same one-embedding-call-total accounting as the fusion
+            # branch above — see that site's comment.
+            semantic_routing.store(query, query_vector)
+            _route_event("intent_llm", query=query, decision=chosen)
             return chosen
 
         if raw:
             _LOGGER.warning("LLM returned unknown source '%s', falling back to kiwix", raw)
+        _route_event("intent_default", query=query, decision="kiwix",
+                     reason="llm_returned_unknown_source" if raw else "llm_returned_nothing")
 
         # Found alongside the same real bug in _llm_pick_fusion_sources(),
         # via the same complexity-investigation pass: this used to cache
@@ -1429,9 +1489,16 @@ def detect_intent(query: str) -> str | list[str]:
     source = _keyword_detect(query)
     if source:
         if isinstance(source, list):
-            return _escalate_multi_source_for_discourse_framing(query, source)
+            escalated_multi = _escalate_multi_source_for_discourse_framing(query, source)
+            _route_event("intent_keyword", query=query,
+                         decision=",".join(escalated_multi))
+            return escalated_multi
         escalated = _escalate_single_source_for_discourse_framing(query, source)
-        return escalated if escalated is not None else source
+        final = escalated if escalated is not None else source
+        _route_event("intent_keyword", query=query,
+                     decision=final if isinstance(final, str) else ",".join(final),
+                     discourse_escalated=escalated is not None)
+        return final
     _LOGGER.info("No keyword match for '%s', asking LLM for source selection", query[:50])
     return _llm_detect(query)
 
@@ -2116,6 +2183,32 @@ def _route_stat(key: str, value) -> None:
         stats[key] = value
 
 
+def _route_event(step: str, **fields) -> None:
+    """Append one explanation-chain event to the current route_query()
+    call's trace, if one is in progress — a no-op for every caller that
+    didn't come through route_query(), exactly like _route_stat().
+
+    Events are the substrate for /search's explain=true (see
+    wiki/Explanation-Chains.md): small dicts recorded at the same
+    authoritative code points the boolean stats already are, so the
+    explanation can never disagree with what actually ran — both are
+    the same recording, not a parallel reconstruction.
+
+    Thread-safety: list.append() is a single atomic operation under the
+    GIL, so appends from concurrent decompose/conditional worker
+    threads are individually safe. Their INTERLEAVING is genuinely
+    nondeterministic — two concurrent sub-queries' events arrive in
+    completion order, not ask order — which is why every event carries
+    the query text it belongs to: attribution comes from the event's
+    own fields, never from its position in the list.
+    """
+    stats = _ROUTE_STATS.get()
+    if stats is not None:
+        events = stats.get("events")
+        if events is not None:
+            events.append({"step": step, **fields})
+
+
 class RouteOutcome(NamedTuple):
     """Everything /search needs to know about one routed query —
     returned by route_query() below."""
@@ -2125,6 +2218,7 @@ class RouteOutcome(NamedTuple):
     fallback_occurred: bool
     success: bool
     error: str | None
+    explanation: list[dict]
 
 
 def route_query(query: str, source: str = "auto", fusion_sources: list[str] | None = None) -> RouteOutcome:
@@ -2154,6 +2248,12 @@ def route_query(query: str, source: str = "auto", fusion_sources: list[str] | No
         "invoked_any_source": False,
         "fallback_occurred": False,
         "intended_source": None,
+        # The explanation chain — ordered _route_event() records. Always
+        # collected (appends of small dicts are noise next to any real
+        # routing work); main.py decides whether to RETURN it based on
+        # the request's explain flag, so non-explain responses carry
+        # nothing extra beyond a null field.
+        "events": [],
     }
     token = _ROUTE_STATS.set(stats)
     try:
@@ -2166,6 +2266,7 @@ def route_query(query: str, source: str = "auto", fusion_sources: list[str] | No
             fallback_occurred=stats["fallback_occurred"],
             success=True,
             error=None,
+            explanation=stats["events"],
         )
     except Exception as e:
         # Report the source this query was actually headed to when it
@@ -2182,6 +2283,9 @@ def route_query(query: str, source: str = "auto", fusion_sources: list[str] | No
             fallback_occurred=stats["fallback_occurred"],
             success=False,
             error=str(e),
+            # The partial chain of what ran BEFORE the failure — a trace
+            # earns its keep most on exactly this path.
+            explanation=stats["events"],
         )
     finally:
         _ROUTE_STATS.reset(token)
@@ -2220,18 +2324,25 @@ def _resolve_single_source(source: str, query: str) -> tuple[str, str]:
         return cached, source
 
     _route_stat("invoked_any_source", True)
+    invoke_start = time.monotonic()
     result = handler(query)
+    _route_event("source_invoked", source=source, query=query,
+                 elapsed_ms=int((time.monotonic() - invoke_start) * 1000))
 
     if _looks_empty(result) and source in FALLBACK_CHAIN:
         fallback_source = FALLBACK_CHAIN[source]
         _LOGGER.info("Result from '%s' looks empty, falling back to '%s'", source, fallback_source)
+        _route_event("fallback", from_source=source, to_source=fallback_source, query=query)
         fallback_handler = SOURCE_MAP.get(fallback_source)
         if fallback_handler:
             cached_fallback = _get_cached(fallback_source, query)
             if cached_fallback:
                 _route_stat("fallback_occurred", True)
                 return cached_fallback, fallback_source
+            invoke_start = time.monotonic()
             fallback_result = fallback_handler(query)
+            _route_event("source_invoked", source=fallback_source, query=query,
+                         elapsed_ms=int((time.monotonic() - invoke_start) * 1000))
             if not _looks_empty(fallback_result):
                 _LOGGER.info("Fallback to '%s' succeeded", fallback_source)
                 # Recorded HERE, at the one place a fallback genuinely
@@ -2293,6 +2404,8 @@ def _resolve_conditional(query: str, source: str) -> tuple[str, str] | None:
         "Detected conditional query — condition=%r consequence=%r remainder=%r",
         condition[:50], consequence[:50], remainder[:50]
     )
+    _route_event("conditional_detected", query=query, condition=condition,
+                 consequence=consequence, remainder=remainder)
 
     # The condition and remainder calls have no real data dependency on
     # each other — route_with_source(remainder, ...) only needs the
@@ -2591,6 +2704,8 @@ def _resolve_decomposed_sub_query(sub_q: str) -> list[tuple[str, str]]:
     sub_conditional = detect_conditional(sub_q)
     if sub_conditional:
         sub_condition, sub_consequence, sub_remainder = sub_conditional
+        _route_event("conditional_detected", query=sub_q, condition=sub_condition,
+                     consequence=sub_consequence, remainder=sub_remainder)
         sub_condition_result, sub_source = route_with_source(sub_condition, "auto")
         sub_result = _frame_conditional_response(
             sub_condition, sub_consequence, sub_condition_result, sub_source
@@ -2632,7 +2747,11 @@ def _resolve_decomposed_sub_query(sub_q: str) -> list[tuple[str, str]]:
             sub_result = cached_sub_fusion
         else:
             _route_stat("invoked_any_source", True)
+            _route_event("fusion", query=sub_q, sources=list(intent))
+            invoke_start = time.monotonic()
             sub_result = fusion.search(sub_q, intent)
+            _route_event("source_invoked", source="fusion", query=sub_q,
+                         elapsed_ms=int((time.monotonic() - invoke_start) * 1000))
             if not _looks_empty(sub_result):
                 _set_cached("fusion", sub_cache_key, sub_result)
     else:
@@ -2684,6 +2803,7 @@ def route_with_source(query: str, source: str = "auto", fusion_sources: list[str
         sub_queries = _decompose(query)
         if len(sub_queries) > 1:
             _LOGGER.info("Routing %d decomposed sub-queries for: '%s'", len(sub_queries), query[:50])
+            _route_event("decomposed", query=query, parts=list(sub_queries))
             # Sub-queries are genuinely independent by construction —
             # _decompose() only ever splits on conjunctions joining
             # separate intents, and no sub-query's resolution reads
@@ -2769,7 +2889,11 @@ def route_with_source(query: str, source: str = "auto", fusion_sources: list[str
         if cached:
             return cached, "fusion"
         _route_stat("invoked_any_source", True)
+        _route_event("fusion", query=query, sources=list(fusion_sources))
+        invoke_start = time.monotonic()
         result = fusion.search(query, fusion_sources)
+        _route_event("source_invoked", source="fusion", query=query,
+                     elapsed_ms=int((time.monotonic() - invoke_start) * 1000))
         if not _looks_empty(result):
             _set_cached("fusion", cache_key_query, result)
         return result, "fusion"

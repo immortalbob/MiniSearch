@@ -233,3 +233,72 @@ def _complete_openai(prompt: str, max_tokens: int, temperature: float) -> str | 
 
     return raw.strip(".").strip() or None
 
+
+# ---------------------------------------------------------------------------
+# Embeddings — for the semantic routing cache
+# ---------------------------------------------------------------------------
+
+def embeddings_configured() -> bool:
+    """Return True if an embedding model is configured.
+
+    Deliberately a separate switch from is_configured() — routing/
+    completion and embeddings are independent capabilities, and plenty
+    of real deployments (including anyone trying this project fresh
+    from GitHub) will run a chat model with no embedding model pulled
+    at all. EMBEDDING_MODEL defaults to empty, which cleanly disables
+    the semantic routing cache with zero behavior change rather than
+    producing a failed HTTP call on every cold routing decision.
+    """
+    return bool(settings.embedding_model and (settings.embedding_url or settings.llm_url))
+
+
+def embed(text: str) -> list[float] | None:
+    """Return an embedding vector for `text`, or None on any failure.
+
+    Backend selection mirrors complete(): LLM_API_TYPE=openai hits the
+    OpenAI-compatible /v1/embeddings shape; anything else hits Ollama's
+    native /api/embed (the current-generation endpoint — its response
+    is {"embeddings": [[...]]}, a batch shape even for one input, which
+    is why the [0] below isn't a typo; the older /api/embeddings
+    endpoint with its singular {"embedding": [...]} shape is deprecated
+    in Ollama's own docs and not targeted here).
+
+    Uses the same persistent _session as every completion call —
+    embeddings ride the identical connection pool, so the semantic
+    cache's lookup cost is one small POST on an already-open
+    connection, not a fresh TCP setup.
+
+    Never raises: every caller treats None as "no embedding available,
+    proceed without semantic matching" — an embedding failure must
+    never make routing worse than it was before this feature existed.
+    """
+    if not embeddings_configured():
+        return None
+    base_url = settings.embedding_url or settings.llm_url
+    api_type = settings.llm_api_type.lower().strip()
+    try:
+        if api_type == "openai":
+            resp = _session.post(
+                f"{base_url}/v1/embeddings",
+                json={"model": settings.embedding_model, "input": text},
+                timeout=settings.embedding_timeout_seconds,
+            )
+            resp.raise_for_status()
+            data = resp.json().get("data", [])
+            vector = data[0].get("embedding") if data else None
+        else:
+            resp = _session.post(
+                f"{base_url}/api/embed",
+                json={"model": settings.embedding_model, "input": text},
+                timeout=settings.embedding_timeout_seconds,
+            )
+            resp.raise_for_status()
+            vectors = resp.json().get("embeddings", [])
+            vector = vectors[0] if vectors else None
+        if not vector or not isinstance(vector, list):
+            _LOGGER.warning("Embedding response missing vector (model=%s)", settings.embedding_model)
+            return None
+        return [float(x) for x in vector]
+    except Exception as e:
+        _LOGGER.warning("Embedding call failed (%s): %s", api_type, e)
+        return None

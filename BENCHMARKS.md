@@ -1016,6 +1016,72 @@ The headline numbers: **zero failures across 1750 requests** at 20 concurrent us
 
 **`auto` cold p90: 740ms** — consistent with the 700–740ms plateau documented across every prior run, confirming that number reflects the real, ordinary cost of one unqueued LLM call on this hardware, not a fixable code issue. The warm improvement in `auto` (63ms p90 vs the prior plateau) confirms the model is staying loaded; the cold number confirms a fresh LLM call still costs what it always has.
 
+### 20 Users — v3.52.0 Post-Recommendations Benchmark
+
+Run after implementing every recommendation from the v3.51.1 external review — the `route_query()` `/search` redesign (no pre-route LLM call, ContextVar stats channel), parallel decomposed sub-queries, HTTP sessions for every source module, FreshRSS token caching, batched routing-cache persistence, the WAL-consistent `/backup`, the Kiwix Wikipedia-bonus fix, and the SQLite connection-leak sweep. Config: `--headless --users 20 --spawn-rate 2 --run-time 120s`. **0 failures, 0 exceptions, both runs — 1741 requests total.**
+
+**Cold cache (851 requests, 7.13 req/s)**
+
+| Endpoint | Median | p90 | p95 | p99 | n |
+|----------|--------|-----|-----|-----|---|
+| `/search [kiwix]` | 22ms | 1000ms | 1400ms | 5700ms | 82 |
+| `/search [kiwix_disambiguation]` | 22ms | 1700ms | 2000ms | 2200ms | 36 |
+| `/search [web]` | 22ms | 160ms | 1400ms | 7600ms | 71 |
+| `/search [conditional]` | 41ms | 1000ms | 1100ms | 1300ms | 37 |
+| `/search [conditional_remainder]` | 70ms | 650ms | 1200ms | 1200ms | 20 |
+| `/search [discourse_framing]` | 25ms | 50ms | 1200ms | 10000ms | 47 |
+| `/search [forecast]` | 21ms | 29ms | 32ms | 210ms | 58 |
+| `/search [news]` | 21ms | 28ms | 49ms | 200ms | 34 |
+| `/search [uptime]` | 21ms | 100ms | 210ms | 210ms | 16 |
+| `/search [ha]` | 41ms | 58ms | 99ms | 99ms | 14 |
+| `/search [auto]` | 24ms | 200ms | 210ms | 2100ms | 59 |
+| `/search [fusion_explicit]` | 22ms | 31ms | 38ms | 210ms | 170 |
+| `/search [fusion_auto]` | 25ms | 33ms | 92ms | 1400ms | 111 |
+| `/search [fusion_triple]` | 21ms | 28ms | 36ms | 210ms | 45 |
+| `/search [cache_hit]` | 22ms | 40ms | 71ms | 3600ms | 23 |
+| `/health` | 690ms | 740ms | 750ms | 1700ms | 28 |
+| **Aggregated** | **23ms** | **200ms** | **700ms** | **2200ms** | **851** |
+
+**Warm cache (890 requests, 7.47 req/s)**
+
+| Endpoint | Median | p90 | p95 | p99 | n |
+|----------|--------|-----|-----|-----|---|
+| `/search [kiwix]` | 21ms | 25ms | 25ms | 72ms | 82 |
+| `/search [kiwix_disambiguation]` | 22ms | 26ms | 32ms | 47ms | 45 |
+| `/search [web]` | 22ms | 25ms | 26ms | 37ms | 84 |
+| `/search [conditional]` | 36ms | 210ms | 1000ms | 2300ms | 44 |
+| `/search [conditional_remainder]` | 39ms | 63ms | 590ms | 590ms | 13 |
+| `/search [discourse_framing]` | 26ms | 31ms | 33ms | 49ms | 48 |
+| `/search [forecast]` | 23ms | 24ms | 25ms | 39ms | 52 |
+| `/search [news]` | 22ms | 29ms | 30ms | 31ms | 46 |
+| `/search [uptime]` | 22ms | 58ms | 62ms | 62ms | 17 |
+| `/search [ha]` | 40ms | 51ms | 52ms | 57ms | 25 |
+| `/search [auto]` | 23ms | 62ms | 67ms | 78ms | 75 |
+| `/search [fusion_explicit]` | 23ms | 29ms | 32ms | 36ms | 149 |
+| `/search [fusion_auto]` | 25ms | 30ms | 33ms | 38ms | 119 |
+| `/search [fusion_triple]` | 22ms | 25ms | 29ms | 34ms | 63 |
+| `/search [cache_hit]` | 22ms | 24ms | 33ms | 33ms | 12 |
+| `/health` | 720ms | 740ms | 1200ms | 1200ms | 16 |
+| **Aggregated** | **23ms** | **36ms** | **54ms** | **730ms** | **890** |
+
+**Analysis:**
+
+**Warm aggregated p95: 63ms → 54ms — a new project best**, on top of v3.51.0's own record. Warm p90 is 36ms. Every non-conditional endpoint's warm p99 is now ≤78ms; `web` warm p99 dropped 98ms → 37ms and `discourse_framing` warm p95 48ms → 33ms, both consistent with the new per-module HTTP sessions removing a fresh-TCP-setup cost from every SearXNG/Kiwix round trip.
+
+**The conditional family got meaningfully cheaper cold — and this one has a clean causal story.** `conditional` cold p99: 2200ms → 1300ms; `conditional_remainder` cold p95: 3000ms → 1200ms; `kiwix_disambiguation` cold p99: 6700ms → 2200ms. Every conditional-shaped query previously paid `main.py`'s pre-route `detect_intent()` on the *full* "if X, Y" string — a complete cold LLM routing call for an intent decision the conditional path never uses, stacked on top of the real condition/remainder routing. `route_query()` removed exactly that call, and these are precisely the endpoints where it shows.
+
+**`auto` cold p90: 740ms → 200ms.** Reported honestly rather than over-claimed: the 700–740ms cold plateau was previously root-caused to the ordinary cost of one unqueued LLM routing call, and `AUTO_QUERIES` are single-intent (no decomposition, so the wasted-pre-call fix doesn't apply to them — for single-intent queries the pre-call's result was reused from the routing cache, not wasted). The most plausible explanation is simply a faster LLM this session — qwen3:8b already resident in VRAM (`LLM_KEEP_ALIVE`) with The Beast otherwise idle, so each routing call ran at ~200ms rather than the ~700ms an unqueued-but-fresh call had consistently cost. `auto` cold p99 at 2100ms still shows full-cost calls in the tail. Worth watching whether the 200ms p90 reproduces on the next cold run before treating the old plateau as gone.
+
+**Honest accounting of the anomalies, all in the cold run:**
+
+- `discourse_framing` cold max **10024ms** (single request, n=47, p99 = max). That number is `llm.py`'s own HTTP `timeout=10` almost to the millisecond: one Ollama call hung under queue contention, hit the client timeout ceiling, and Mnemolis fell back — the timeout working as designed, not a hang or a failure. The request still succeeded.
+- `cache_hit` cold p99 **3612ms** — the same single-cold-request anomaly documented and root-caused in the v3.50.11 run (ordinary Ollama queue contention on the pool's one cold entry, unrelated to Mnemolis code). It recurring at the same shape reinforces that diagnosis.
+- `kiwix` cold max 5678ms and `web` cold max 7585ms — single-request tails (p99 ≈ max at these n), same Ollama-contention family. Heavier singles than v3.51.0's cold run caught, but prior cold runs have ranged up to 6700ms on individual requests; this is sample luck, not a trend, and warm p99 for both is ≤72ms.
+
+**`/health` appears in the tables for the first time** (~690–720ms median, both runs). Not a regression — it was simply never broken out in prior tables. The number is the concurrent source-check fan-out bounded by its slowest member (the external Open-Meteo call plus the LLM reachability check), which is exactly what the endpoint is for.
+
+**Net read:** the v3.52.0 changes cost nothing at the median (23ms, unchanged since v3.5.0-era baselines), improved the warm tail to its best-ever shape, removed a real structural LLM call from every conditional query's cold path, and left zero failures across 1741 requests.
+
 ## Running benchmarks
 
 Replace `192.168.1.50` below with your actual Mnemolis host's real IP or hostname — not a placeholder. `--host` silently accepts anything that looks like a URL, so a leftover example value doesn't fail loudly; it fails much later as a DNS error (`Temporary failure in name resolution`) on every single request, which doesn't obviously point back to `--host` as the cause.

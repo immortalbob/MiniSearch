@@ -31,6 +31,7 @@ from app.router import (
 from app.mcp_server import mcp_app, get_mcp_app
 from app.sources.kiwix import get_books, refresh_catalog
 from app.sources import uptime_kuma
+from app import semantic_routing
 from app.snapshots import (
     init_snapshot_db,
     snapshot_uptime,
@@ -331,7 +332,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Mnemolis",
     description="Unified local knowledge search API with multi-source fusion. Routes queries to Kiwix, Open-Meteo, FreshRSS, SearXNG, Uptime Kuma, or multiple sources concurrently.",
-    version="3.52.0",
+    version="3.53.0",
     lifespan=lifespan,
 )
 
@@ -342,6 +343,14 @@ class SearchRequest(BaseModel):
     query: str
     source: str = "auto"
     fusion_sources: list[str] | None = None  # only used when source="fusion"
+    # Explanation chains — when true, the response's `explanation` field
+    # carries the ordered trace of routing events (intent resolution,
+    # cache hits, source invocations with elapsed times, fallbacks,
+    # decomposition, conditionals, semantic matches). Off by default:
+    # without it the field is null, so existing clients see one new
+    # always-null key and nothing else changes. See
+    # wiki/Explanation-Chains.md.
+    explain: bool = False
 
 
 class SearchResponse(BaseModel):
@@ -351,6 +360,8 @@ class SearchResponse(BaseModel):
     success: bool
     cached: bool = False
     error: Optional[str] = None
+    # Present only when the request set explain=true — see SearchRequest.
+    explanation: Optional[list[dict]] = None
 
 
 def _check_kiwix() -> dict:
@@ -560,6 +571,28 @@ def routing_cache_clear():
     return {"status": "cleared", "entries_removed": count}
 
 
+@app.get("/cache/semantic")
+def semantic_cache_stats():
+    """
+    Show the semantic routing cache's current state — whether it's
+    enabled (EMBEDDING_MODEL configured), how many query embeddings are
+    stored, which model produced them, and the active similarity
+    threshold. The store holds only embeddings, never decisions; every
+    match reads its decision back from the live routing cache at match
+    time (see app/semantic_routing.py).
+    """
+    return semantic_routing.stats()
+
+
+@app.post("/cache/semantic/clear")
+def semantic_cache_clear():
+    """Clear the semantic routing cache (in-memory only — there is
+    deliberately nothing on disk to clear; see the persistence
+    rationale in app/semantic_routing.py's module docstring)."""
+    count = semantic_routing.clear()
+    return {"status": "cleared", "entries_removed": count}
+
+
 @app.post("/search", response_model=SearchResponse, dependencies=[Depends(require_api_key)])
 def search(request: SearchRequest):
     # route_query() returns everything this endpoint previously
@@ -598,6 +631,11 @@ def search(request: SearchRequest):
         success=outcome.success,
         cached=outcome.cached,
         error=outcome.error,
+        # The chain is always COLLECTED (see route_query()'s stats dict)
+        # but only RETURNED on request — on failure it's the partial
+        # trace of what ran before things broke, which is when a trace
+        # earns its keep most.
+        explanation=outcome.explanation if request.explain else None,
     )
 
 

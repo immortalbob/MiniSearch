@@ -152,6 +152,9 @@ All settings are passed as environment variables in `docker-compose.yml`:
 | `LLM_API_TYPE` | API format: `ollama` or `openai` | `ollama` |
 | `LLM_CONNECTION_POOL_SIZE` | How many pooled HTTP connections to keep open to the LLM backend at once, for reuse across calls. Raise this if you run with significantly more than 20 concurrent users/requests | `20` |
 | `LLM_KEEP_ALIVE` | How long Ollama keeps the model resident in VRAM after Mnemolis's last call (Ollama-native backend only — see below). Accepts Ollama's own formats: a duration string (`30m`, `3h`), plain seconds, `-1` (never unload), or `0` (unload immediately) | `5m` |
+| `EMBEDDING_MODEL` | Embedding model for the [semantic routing cache](https://github.com/immortalbob/Mnemolis/wiki/Semantic-Routing-Cache) — reuses routing decisions across rephrasings of the same question, skipping the cold LLM routing call. Blank disables the feature entirely (zero behavior change). On Ollama: `ollama pull nomic-embed-text`, then set this to match | _(blank — disabled)_ |
+| `EMBEDDING_URL` | Backend serving the embedding model. Blank = same as `LLM_URL` | _(blank — uses `LLM_URL`)_ |
+| `SEMANTIC_ROUTING_THRESHOLD` | Cosine-similarity floor for reusing another query's routing decision. Deliberately conservative — a wrong reuse silently misroutes | `0.92` |
 | `MORNING_START_HOUR` | Reference hour (0-23, local time) for resolving "this morning" in changes queries | `6` |
 | `WORK_START_HOUR` | Reference hour (0-23, local time) for resolving "while at work" in changes queries | `9` |
 | `API_KEYS` | Comma-separated list of valid API keys. Protects `POST /search` and `GET /changes`. | _(blank — auth disabled)_ |
@@ -663,6 +666,16 @@ Fusion — explicit source list:
 }
 ```
 
+With an explanation chain — the ordered trace of what routing actually did (intent resolution, cache hits, timed source invocations, fallbacks, decomposition, conditionals, semantic matches). See the [Explanation Chains](https://github.com/immortalbob/Mnemolis/wiki/Explanation-Chains) wiki page for the full event vocabulary:
+
+```json
+{
+  "query": "what is molybdenum",
+  "source": "auto",
+  "explain": true
+}
+```
+
 Response:
 
 ```json
@@ -672,9 +685,12 @@ Response:
   "result": "# Molybdenum\nSource: wikipedia_en_all_maxi_2026-02\n\n...",
   "success": true,
   "cached": false,
-  "error": null
+  "error": null,
+  "explanation": null
 }
 ```
+
+(`explanation` carries the event list only when the request set `"explain": true`; otherwise it's `null`.)
 
 ### `GET /sources`
 Returns the list of available sources.
@@ -699,6 +715,12 @@ Shows all current routing cache entries — source and Kiwix book selection deci
 
 ### `POST /cache/routing/clear`
 Clears all routing cache entries from memory and disk.
+
+### `GET /cache/semantic`
+Shows the [semantic routing cache](https://github.com/immortalbob/Mnemolis/wiki/Semantic-Routing-Cache)'s state — whether it's enabled (`EMBEDDING_MODEL` configured), how many query embeddings are stored, which model produced them, and the active similarity threshold. Disabled by default; requires an embedding model (e.g. `ollama pull nomic-embed-text`).
+
+### `POST /cache/semantic/clear`
+Clears the semantic routing cache (in-memory only — its embeddings deliberately don't persist; they rebuild through use).
 
 ### `GET /backup`
 Downloads a tarball of all six Mnemolis data files — result cache, routing cache, query log, snapshot history, adversarial self-testing history, and temporal pattern detection history. See [Backup & Restore](#backup--restore) below.
@@ -843,7 +865,7 @@ locust -f tests/locustfile.py --host http://your-host:8888
 
 See `BENCHMARKS.md` for documented results.
 
-1401 tests across every source module, the routing/decomposition/conditional-detection pipeline, caching, adversarial self-testing, cross-source temporal pattern detection, timezone conversion, and the FastAPI/MCP endpoints — see the test file list under [Project Structure](#project-structure) below for what each file actually covers, or the [Contributing](https://github.com/immortalbob/Mnemolis/wiki/Contributing) page for what a good test for this project looks like.
+1429 tests across every source module, the routing/decomposition/conditional-detection pipeline, caching, adversarial self-testing, cross-source temporal pattern detection, timezone conversion, and the FastAPI/MCP endpoints — see the test file list under [Project Structure](#project-structure) below for what each file actually covers, or the [Contributing](https://github.com/immortalbob/Mnemolis/wiki/Contributing) page for what a good test for this project looks like.
 
 ## Project Structure
 

@@ -4,6 +4,31 @@ All notable changes to Mnemolis are documented here, from v3.45.0 onward. For ev
 
 ---
 
+## [3.53.0]
+
+### Added — Semantic Routing Cache
+
+A third, opt-in cache layer between an exact-match routing-cache miss and the routing LLM: embedding-based reuse of routing decisions across *rephrasings* of the same question ("will it rain later" borrowing "will it rain this evening"'s already-made decision). Targets the last avoidable routing-path latency — the ~200–700ms cold LLM call for a query the exact-match cache has seen only in different words, which for real personal usage (one person asking natural variations of the same few dozen questions) is most cold routing calls.
+
+Design constraints, in priority order (full rationale in `app/semantic_routing.py`'s module docstring and `wiki/Semantic-Routing-Cache.md`): (1) never make routing worse than v3.52.0 — every failure mode (feature off, embedding call failed, empty store, nothing above threshold) falls through to exactly the previous behavior, and the one failure it *can* introduce (a wrong reuse silently misrouting) is why `SEMANTIC_ROUTING_THRESHOLD` defaults conservatively to 0.92; (2) decisions are never stored in the semantic layer — it holds only `(query → normalized vector)` pairs, decisions are always read back from the LIVE routing cache at match time, expired candidates are skipped and pruned, so one source of truth and one TTL govern everything; (3) in-memory only, rebuilt through use — the query that rebuilds an embedding after a restart was about to pay a full LLM call anyway.
+
+Mechanics: hooked inside `_llm_detect()`'s singleflight after the exact-match re-check; a hit promotes the new phrasing to a normal exact-match entry (never pays even the embedding call again) and stores its vector for the *next* rephrasing; a miss reuses the lookup's vector when storing the fresh LLM decision, so the cold path costs at most ONE embedding call total. Model changes drop the store (cross-model cosine similarity is noise), with a per-entry dimension check for the residual case. Vector math is dependency-free: L2-normalize at store time, `math.sumprod()` dot products at lookup (C-speed on the Dockerfile's pinned 3.12; a full scan of a maxed 500-entry store is sub-millisecond, vs 50–100ms for a pure-Python loop — the reason the scan can honestly return the BEST match rather than early-exiting at the first above-threshold one).
+
+New: `app/semantic_routing.py`, `llm.embed()`/`llm.embeddings_configured()` (Ollama `/api/embed` and OpenAI-compatible `/v1/embeddings`, riding llm.py's existing session pool), settings `EMBEDDING_MODEL` (blank = feature fully disabled, zero network I/O), `EMBEDDING_URL`, `EMBEDDING_TIMEOUT_SECONDS`, `SEMANTIC_ROUTING_THRESHOLD`, `SEMANTIC_CACHE_MAX_SIZE`, endpoints `GET /cache/semantic` and `POST /cache/semantic/clear`. 18 new tests, including the one-embedding-call-total contract, expired-decision pruning, the exact-key self-match exclusion, model-change reset, and the LLM-never-called integration path.
+
+### Added — Explanation Chains
+
+`/search` with `"explain": true` returns the ordered trace of what routing actually did: intent resolution (keyword / cached / semantic-with-similarity / fresh LLM / default), result-cache hits, every source invocation with its real measured `elapsed_ms`, fallbacks, decomposition splits, conditional extractions, and fusion dispatches with their source lists. Returned on failures too, as the partial trace of everything that ran before the exception — when a trace earns its keep most.
+
+The first of the project's four original design documents to ship, and deliberately built *after* the v3.52.0 stats channel rather than before it: `_route_event()` appends into the same per-request `_ROUTE_STATS` dict the boolean stats write into, at the same authoritative code points — the explanation is the SAME recording as the stats, never a parallel reconstruction, so it structurally cannot disagree with what actually ran. The original design sketch assumed threading explanation state through `route_with_source()`'s recursion-laden signature, exactly the change that function's history had twice judged not worth its risk; the ContextVar channel collapsed the feature to "more keys in a dict that already flows everywhere," as The Fallback Observability Gap's postscript predicted.
+
+Ordering and attribution: within one thread, events append in genuine execution order (a fallback reads invoked → fallback → invoked); across concurrent decomposed sub-queries the interleaving is nondeterministic (list.append is GIL-atomic, order isn't), which is why every event carries the query text it belongs to — attribution comes from fields, never list position. Events are always collected (small-dict appends are noise next to real routing work, and it keeps the recording path branch-free) but only returned when asked; `explain` defaults to false and the response field is `null` otherwise, so existing clients see one new always-null key and nothing else changes. The MCP `search` tool is unchanged. New: `SearchRequest.explain`, `SearchResponse.explanation`, `RouteOutcome.explanation`, `router._route_event()`, `wiki/Explanation-Chains.md`. 10 new tests, including event-order-within-a-thread, attribution-by-field for concurrent sub-queries, and the partial-chain-on-failure path.
+
+### Changed
+- Version bumped to 3.53.0. Test suite: 1429 passing (from 1401 at v3.52.0), ruff clean. `wiki/Caching.md`, `wiki/Configuration-Reference.md`, `wiki/Roadmap.md` (new "Post-Audit Optimization & Observability" era section), and the README (env table, `/search` and `/cache/semantic` API docs, test count) all updated.
+
+---
+
 ## [3.52.0]
 
 ### Fixed — The Kiwix "Wikipedia Bonus" Never Actually Existed
