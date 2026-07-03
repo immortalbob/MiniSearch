@@ -6,10 +6,10 @@ Every candidate result Kiwix returns — whether from a [single search](Kiwix-Ca
 
 | Signal | Points | Condition |
 |--------|--------|-----------|
-| Exact title match | **+20** | Query and title are identical (case-insensitive, whitespace-trimmed) |
-| Stemmed title match | **+15** | The whole query, or any individual meaningful query word, stems to the same root as the title (`"galaxies"` → `"galaxy"` matching a `"Galaxy"` title) |
-| Title starts with query term | **+10** | The title begins with a meaningful (4+ letter) query word |
-| Per-word title hit | **+5 each** | Each stemmed query word that also appears, stemmed, in the title |
+| Exact title match | **+20** | The title equals the full query OR the query's **content words** (case-insensitive, whitespace-trimmed) — `"what is the new deal"` matches the title `"New Deal"`. The content-words comparison was added in v3.54.1 after tracing a real bad result: the full-query comparison alone could effectively never fire for a naturally-phrased question, since nobody's question is verbatim a Wikipedia title — the strongest signal in this whole table was unreachable in practice |
+| Stemmed title match | **+15** | The whole query, its content-word sequence, or any individual meaningful query word, stems to the same root as the title (`"galaxies"` → `"galaxy"` matching a `"Galaxy"` title) |
+| Title leads with a query term | **+10** | The title's **first token** (punctuation stripped, stemmed) equals a meaningful (4+ letter) query word — deliberately not a raw string prefix, which had a real false-positive class: `"Dealership"` starts with `"deal"` as a string but is not the word, and the prefix version is what handed `"Deal, New Jersey"` a bonus the exact-title `"New Deal"` article couldn't earn (v3.54.1) |
+| Per-word title hit | **+5 each** | Each stemmed query word that also appears, stemmed, in the title — title tokens are punctuation-stripped first (v3.54.1: `"Deal,"` with its comma attached previously never counted as a hit for `"deal"`) |
 | Per-word excerpt hit | **up to +10 total** | Stemmed overlap between query and excerpt, normalized by excerpt length so a long excerpt doesn't win purely by having more words to coincidentally match |
 | List/index article penalty | **−10** | Title starts with `"list of"`, `"lists of"`, `"index of"`, `"outline of"`, or `"category:"` — these are navigation pages, not real content. Applies at full strength to every list article regardless of book |
 | Wikipedia bonus | **+8 or +3** | The result's book contains `"wikipedia"` — +8 if the query is [definitional](Kiwix-Disambiguation#when-this-actually-triggers), +3 otherwise. Applies to every Wikipedia result, unconditionally |
