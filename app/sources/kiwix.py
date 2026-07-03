@@ -1015,7 +1015,24 @@ def search(query: str) -> str:
     seen_urls = set()
     for book in selected_books:
         if disambiguating and "wikipedia" in book:
-            terms_for_book = disambiguation_candidates
+            # The PLAIN search terms are pooled alongside the LLM's
+            # candidate phrasings, never replaced by them — found live
+            # via an explanation-chain trace of "what is a galaxy"
+            # returning "Galaxy morphological classification": the
+            # candidates (specific sub-sense phrasings by design) each
+            # searched fine, but the bare term "galaxy" itself was
+            # never searched at all, so the plain "Galaxy" article
+            # never even entered the pool — and scoring can only rank
+            # what was fetched. The candidates exist to ADD senses the
+            # bare term under-serves, not to bet everything on the LLM
+            # having guessed the right ones; the plain sense is the one
+            # candidate that's always legitimate, and for a definitional
+            # ask it's usually the answer. One extra same-LAN Kiwix
+            # request per disambiguating Wikipedia book; the URL dedup
+            # below already absorbs any overlap.
+            terms_for_book = [search_terms] + [
+                c for c in disambiguation_candidates if c != search_terms
+            ]
         else:
             terms_for_book = [search_terms]
         for term in terms_for_book:

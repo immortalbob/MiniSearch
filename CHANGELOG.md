@@ -4,6 +4,21 @@ All notable changes to Mnemolis are documented here, from v3.45.0 onward. For ev
 
 ---
 
+## [3.54.2]
+
+### Fixed — Disambiguation Candidates Replaced the Plain Search Term Instead of Adding to It
+
+Live verification of v3.54.1 found "what is a galaxy" returning "Galaxy morphological classification" — and an explanation-chain trace (a single `source_invoked` at 6310ms: the disambiguation machinery's signature) plus a code read isolated the cause in about a minute: during disambiguation against a Wikipedia book, `terms_for_book = disambiguation_candidates` REPLACED the plain search terms entirely. The bare term "galaxy" was never searched, so the plain "Galaxy" article never even entered the candidate pool — and scoring, including v3.54.1's content-exact +20 built for exactly this shape of query, can only rank what was fetched. The candidates are specific sub-sense phrasings BY DESIGN; the previous behavior bet everything on the LLM having guessed the right senses, when the plain sense is the one candidate that's always legitimate — and for a definitional ask, usually the answer.
+
+The plain search terms are now pooled FIRST, ahead of the candidates, with a dedup against any candidate identical to the bare term (the LLM sometimes returns it as one — a blind prepend would have searched it twice, caught by an existing test the fix initially broke). Cost: one extra same-LAN Kiwix request per disambiguating Wikipedia book; the existing URL dedup absorbs any result overlap. Verified against the reproduced live shape: plain "Galaxy" now scores 45 (content-exact +20 finally reachable AND fetched) vs the classification article's 25. One pre-existing test updated to pin the pooled term order; 2 new regression tests including the live incident end to end and the LLM-repeats-the-bare-term dedup.
+
+Worth noting the compounding: v3.54.1 made the exact-title signal *scoreable* and this makes it *reachable* — the two halves of the same fix, found two days apart because each one's verification exposed the next layer. This is also the third consecutive release where a casual live CLI query found a real bug the 1400+-test suite structurally couldn't — the suite pins mechanisms; the live index supplies adversarial candidates nobody would invent.
+
+### Changed
+- Version bumped to 3.54.2. Test suite: 1453 passing (from 1451 at v3.54.1), ruff clean.
+
+---
+
 ## [3.54.1]
 
 ### Fixed — "What Is the New Deal" Returned Deal, New Jersey: Three Compounding Scoring Defects

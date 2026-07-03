@@ -857,7 +857,16 @@ class TestDisambiguationOnlyAppliesToWikipediaBook:
              patch.object(kiwix.settings, "llm_model", "fake-model"):
             kiwix.search("what is galaxy")
 
-        assert calls_per_book["wikipedia_en_all_maxi_2026-02"] == ["galaxy astronomy", "galaxy spiral", "galaxy"]
+        # The Wikipedia book searches the PLAIN term first, then the
+        # candidates (minus any candidate identical to the plain term —
+        # "galaxy" appears in both lists here and must not be searched
+        # twice). The plain term always participating is the v3.54.2
+        # pooling fix: candidates exist to ADD senses, never to replace
+        # the bare term, whose article scoring can only rank if it was
+        # actually fetched. The non-Wikipedia book still gets only the
+        # plain terms — disambiguation candidates are Wikipedia-oriented
+        # phrasings it has no business searching with.
+        assert calls_per_book["wikipedia_en_all_maxi_2026-02"] == ["galaxy", "galaxy astronomy", "galaxy spiral"]
         assert calls_per_book["raspberrypi.stackexchange.com_en_all"] == ["galaxy"]
 
 
@@ -1370,3 +1379,71 @@ class TestArticleFetchFallbackCap:
 
         assert "Real article content here." in result
         assert "Article 3" in result
+
+
+class TestPlainTermPooledDuringDisambiguation:
+    """Regression tests for the 'what is a galaxy' -> 'Galaxy
+    morphological classification' incident (v3.54.2), diagnosed live
+    from an explanation-chain trace: during disambiguation, the LLM's
+    candidate phrasings REPLACED the plain search term entirely, so the
+    bare term was never searched and the plain 'Galaxy' article never
+    even entered the candidate pool — the v3.54.1 content-exact +20
+    can only rank what was fetched. The plain term is the one candidate
+    that's always legitimate, and for a definitional ask it's usually
+    the answer."""
+
+    def _run_search(self, candidates, per_term_results, query="what is a galaxy"):
+        from app.sources import kiwix
+        from unittest.mock import patch
+
+        searched = []
+
+        def fake_search_book(term, book, limit=None):
+            searched.append(term)
+            return per_term_results.get(term, [])
+
+        with patch.object(kiwix, "get_books", return_value=[
+                 {"name": "wikipedia_en_all_maxi_2026-02", "title": "W", "summary": ""}]), \
+             patch.object(kiwix, "_pick_books_with_llm",
+                          return_value=["wikipedia_en_all_maxi_2026-02"]), \
+             patch.object(kiwix, "_should_disambiguate", return_value=True), \
+             patch.object(kiwix, "_get_disambiguation_candidates", return_value=candidates), \
+             patch.object(kiwix, "_search_book", side_effect=fake_search_book), \
+             patch.object(kiwix, "_fetch_article", side_effect=lambda url: f"content for {url}"):
+            result = kiwix.search(query)
+        return result, searched
+
+    def test_plain_galaxy_article_wins_the_live_incident(self):
+        """The exact live shape: candidates pool around sub-senses, the
+        plain article only surfaces for the bare term. Before the fix,
+        the bare term was never searched and the classification article
+        won by default; now the plain article must both be fetched AND
+        win scoring."""
+        book = "wikipedia_en_all_maxi_2026-02"
+        per_term = {
+            "galaxy": [{"title": "Galaxy", "excerpt": "gravitationally bound system",
+                        "url": "http://kiwix/Galaxy", "book": book}],
+            "galaxy morphological classification": [
+                {"title": "Galaxy morphological classification", "excerpt": "",
+                 "url": "http://kiwix/Class", "book": book}],
+            "galaxy formation": [
+                {"title": "Galaxy formation and evolution", "excerpt": "",
+                 "url": "http://kiwix/Form", "book": book}],
+        }
+        result, searched = self._run_search(
+            ["galaxy morphological classification", "galaxy formation"], per_term
+        )
+        assert "galaxy" in searched, "the plain term was never searched"
+        assert searched[0] == "galaxy", "the plain term should be pooled first"
+        assert result.startswith("# Galaxy\n"), f"plain article did not win: {result[:60]!r}"
+
+    def test_plain_term_not_searched_twice_when_llm_repeats_it(self):
+        """The LLM sometimes returns the bare term AS a candidate —
+        pooling must not search it twice."""
+        book = "wikipedia_en_all_maxi_2026-02"
+        per_term = {"galaxy": [{"title": "Galaxy", "excerpt": "",
+                                "url": "http://kiwix/Galaxy", "book": book}]}
+        _result, searched = self._run_search(
+            ["galaxy", "galaxy astronomy"], per_term
+        )
+        assert searched.count("galaxy") == 1
