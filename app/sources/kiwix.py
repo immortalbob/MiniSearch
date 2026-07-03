@@ -577,10 +577,15 @@ def _score_result(result: dict, query: str, primary_book: str) -> int:
     """Score a search result by relevance to the query.
 
     Scoring breakdown:
-    - Exact title match (case-insensitive): +20
-    - Stemmed title match (plural/suffix variations): +15
-    - Title starts with query (after stop word removal): +10
-    - Each query word in title (stop words removed): +5 each
+    - Exact title match (case-insensitive, against the full query OR its
+      content words — "what is the new deal" matches the title
+      "New Deal"): +20
+    - Stemmed title match (plural/suffix variations, full/content/word
+      forms): +15
+    - Title LEADS WITH a meaningful query term (first token,
+      punctuation-stripped and stemmed — never a raw string prefix): +10
+    - Each query word in title (stop words removed, tokens
+      punctuation-stripped): +5 each
     - Query word overlap in excerpt (stop words removed): up to +10 total,
       normalized by excerpt length so a short, precisely on-topic excerpt
       competes fairly against a long, loosely-related one — NOT a flat
@@ -639,13 +644,41 @@ def _score_result(result: dict, query: str, primary_book: str) -> int:
     # Strip stop words from query for word-level scoring
     query_words = set(scoring_query_lower.split()) - _STOP_WORDS
 
-    title_words = set(title_lower.split()) - _STOP_WORDS
-    excerpt_words = set(excerpt_lower.split()) - _STOP_WORDS
+    # Tokenize titles and excerpts with surrounding punctuation stripped
+    # — found by tracing the real "what is the new deal" -> "Deal, New
+    # Jersey" bad result: "Deal, New Jersey".split() yields the token
+    # "deal," (comma attached), whose stem is not "deal", so the borough
+    # was only ever credited with ONE title hit for a two-word overlap;
+    # "(New Zealand" and "show)" in game-show titles had the same
+    # problem. Word-level hits below must count real words, not
+    # punctuation-glued fragments — this fix raises some wrong-ish
+    # candidates' scores too (that borough now honestly has both words),
+    # which is exactly why the content-words exact match below exists to
+    # dominate them.
+    _PUNCT = ".,;:!?()[]{}\"'"
+    title_tokens = [t for t in (w.strip(_PUNCT) for w in title_lower.split()) if t]
+    title_words = set(title_tokens) - _STOP_WORDS
+    excerpt_words = {t for t in (w.strip(_PUNCT) for w in excerpt_lower.split()) if t} - _STOP_WORDS
+
+    # The query's content words, in order — what the person is actually
+    # asking about once question framing is gone. "what is the new deal"
+    # -> "new deal".
+    content_query = " ".join(w for w in scoring_query_lower.split() if w not in _STOP_WORDS)
 
     score = 0
 
-    # Exact title match — strongest signal
-    if query_lower == title_lower:
+    # Exact title match — strongest signal. Compared against BOTH the
+    # full query and its content words: the full-query comparison alone
+    # (the previous behavior) could effectively never fire for a
+    # naturally-phrased question, since "what is the new deal" is never
+    # a Wikipedia title — confirmed by tracing that exact real query,
+    # where the "New Deal" article (a title that IS the query's content
+    # words) earned nothing here and lost to "Deal, New Jersey", which
+    # collected the starts-with bonus below for merely leading with
+    # "deal". A title equal to what the person is asking about is the
+    # single strongest relevance signal this function has, and it must
+    # actually be reachable.
+    if query_lower == title_lower or (content_query and content_query == title_lower):
         score += 20
 
     # Stemmed match — catches plural/suffix variations
@@ -653,11 +686,24 @@ def _score_result(result: dict, query: str, primary_book: str) -> int:
     # e.g. "what are galaxies" → "galaxies" → stems to "galaxy" → matches "Galaxy" title
     elif _stem(query_lower) == _stem(title_lower):
         score += 15
+    elif content_query and " ".join(_stem(w) for w in content_query.split()) == " ".join(
+        _stem(t) for t in title_tokens
+    ):
+        score += 15
     elif any(_stem(w) == _stem(title_lower) for w in query_words if len(w) > 3):
         score += 15
 
-    # Title starts with a meaningful query term
-    if any(title_lower.startswith(w) for w in query_words if len(w) > 3):
+    # Title LEADS WITH a meaningful query term — first token, stemmed,
+    # not a raw string prefix. The previous title_lower.startswith(w)
+    # check had a real false-positive class: "dealership" starts with
+    # "deal" as a string but is not the word "deal", and the check is
+    # what handed "Deal, New Jersey" a +10 the exact-title "New Deal"
+    # article couldn't earn (its leading word "new" fails the len>3
+    # filter). Token-exact keeps the bonus's actual intent — the title
+    # opens with the person's topic word — without rewarding prefixes.
+    if title_tokens and any(
+        _stem(title_tokens[0]) == _stem(w) for w in query_words if len(w) > 3
+    ):
         score += 10
 
     # Word-level title hits with stemming

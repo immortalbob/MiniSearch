@@ -4,6 +4,25 @@ All notable changes to Mnemolis are documented here, from v3.45.0 onward. For ev
 
 ---
 
+## [3.54.1]
+
+### Fixed — "What Is the New Deal" Returned Deal, New Jersey: Three Compounding Scoring Defects
+
+Live CLI verification of v3.54.0 found the v3.53.1 term-building fix had done its half (Kiwix received `new deal`, not the literal `new`) but the failure had moved downstream: the response was **Deal, New Jersey**. Checking Kiwix's own engine directly showed the genuine "New Deal" article at position 5 of its results — well inside the 15 Mnemolis fetches — so Mnemolis's scoring out-ranked it, 20 to the borough's 25. (The same check also surfaced an unrelated operational find: a corrupt `asheron-fandom-test4.zim` leftover was 500ing kiwix-serve's *unscoped* search endpoint entirely; Mnemolis was unaffected since it always scopes by book, but the file needed removing.)
+
+Reproducing the scoring against the real candidate list isolated three compounding defects in `_score_result()`:
+
+1. **The +20 exact-title match was effectively unreachable.** It compared the title against the FULL raw query only — and "what is the new deal" is never a Wikipedia title, so the rubric's strongest signal couldn't fire for any naturally-phrased question. Now compared against the full query OR its content words ("what is the new deal" → "new deal" == the title), with a stemmed content-sequence variant at +15.
+2. **The +10 starts-with bonus was a raw string prefix.** `title_lower.startswith(w)` handed "Deal, New Jersey" a bonus the exact-title article couldn't earn ("new" fails the len>3 filter), and would match "Dealership" for "deal" the same way. Now token-exact: the title's FIRST token, punctuation-stripped and stemmed, must equal a meaningful query word.
+3. **Title/excerpt tokenization never stripped punctuation.** "Deal," (comma attached) stems to "deal,", not "deal" — the borough was only credited ONE title hit for a two-word overlap, and "(New" / "show)" fragments had the same problem. Tokens are now punctuation-stripped before the hit sets are built; this honestly RAISES some wrong candidates' scores (the borough now has both words), which is exactly why fix 1 exists to dominate them.
+
+Post-fix on the live candidate list: New Deal 40, the borough and the game show 30, everything else 20. All prior scoring incidents re-verified intact (the molybdenum element now earns the full +20 content-exact match instead of +15 stemmed; galaxy disambiguation unchanged). 4 new regression tests including the live candidate list pinned end to end, the Dealership prefix false-positive, and punctuation-glued tokens counting as hits; the rubric docstring and `wiki/Kiwix-Scoring.md`'s point table both corrected to describe the real conditions.
+
+### Changed
+- Version bumped to 3.54.1. Test suite: 1451 passing (from 1447 at v3.54.0), ruff clean.
+
+---
+
 ## [3.54.0]
 
 ### Added — Semantic Cache Startup Warmup

@@ -702,3 +702,68 @@ class TestScoreResultColloquialFramingExcluded:
         colloquial = _score_result(result, "whats the story with molybdenum", book)
         formal = _score_result(result, "what is molybdenum", book)
         assert colloquial == formal
+
+
+class TestScoreResultContentWordsExactMatch:
+    """Regression tests for the 'what is the new deal' -> 'Deal, New
+    Jersey' incident (v3.54.1) — three compounding defects traced live
+    against the real Kiwix candidate list, which had the genuine 'New
+    Deal' article at position 5 losing 20 to 25:
+
+    1. The +20 exact-title match compared the title against the FULL
+       raw query only, so it could effectively never fire for a
+       naturally-phrased question — the rubric's strongest signal was
+       unreachable in practice.
+    2. The +10 starts-with bonus was a raw string prefix over any
+       meaningful query word: 'deal, new jersey'.startswith('deal')
+       earned the borough a bonus the exact-title article couldn't
+       ('new' fails the len>3 filter), and 'dealership' would have
+       matched 'deal' the same way.
+    3. Title tokenization never stripped punctuation: 'Deal,' (comma
+       attached) stems to 'deal,', not 'deal', so the borough was only
+       credited ONE title hit for a two-word overlap — an undercount
+       that happened to hurt the wrong candidate while the real defects
+       carried it to the win anyway.
+    """
+
+    def _score(self, title, q, excerpt=""):
+        from app.sources.kiwix import _score_result
+        book = "wikipedia_en_all_maxi_2026-02"
+        return _score_result({"title": title, "excerpt": excerpt, "book": book}, q, book)
+
+    def test_new_deal_beats_deal_new_jersey_on_the_live_candidate_list(self):
+        """The exact live incident, pinned with the real top contenders
+        Kiwix returned — the article whose title IS the query's content
+        words must win. Confirmed 20 vs 25 in the other direction
+        against the pre-fix code."""
+        q = "what is the new deal"
+        contenders = ["Deal, New Jersey", "Deal or No Deal (New Zealand game show)",
+                      "The Living New Deal", "Green New Deal", "New Deal (disambiguation)"]
+        winner_score = self._score("New Deal", q)
+        for title in contenders:
+            assert winner_score > self._score(title, q), f"'New Deal' lost to '{title}'"
+
+    def test_content_words_exact_match_fires_for_natural_phrasing(self):
+        """'tell me about photosynthesis' must give the 'Photosynthesis'
+        title the full exact-match bonus — a title equal to what the
+        person is asking about, once question framing is stripped."""
+        base = self._score("Photosynthesis unrelated extra", "tell me about photosynthesis")
+        exact = self._score("Photosynthesis", "tell me about photosynthesis")
+        assert exact > base
+
+    def test_starts_with_bonus_is_token_exact_not_a_string_prefix(self):
+        """'Dealership' must NOT collect the leads-with bonus for the
+        query word 'deal' — same per-word hits as a control title with
+        equally-unrelated words, so any difference would be the prefix
+        false-positive."""
+        q = "what is the new deal"
+        dealership = self._score("Dealership history", q)
+        control = self._score("History dealership", q)
+        assert dealership == control
+
+    def test_punctuation_glued_title_tokens_still_count_as_hits(self):
+        """'Deal,' with its comma attached must count as a title hit for
+        'deal' — pinned by comparing against the same title without the
+        comma, which must now score identically."""
+        q = "what is the new deal"
+        assert self._score("Deal, New Jersey", q) == self._score("Deal New Jersey", q)
