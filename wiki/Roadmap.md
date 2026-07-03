@@ -63,6 +63,14 @@ Full per-file account in [The Full Audit Pass](The-Full-Audit-Pass). Benchmark a
 - ✅ `CHANGELOG.md` split at the v3.44.1/v3.45.0 seam — the project's own real checkpoint between the original feature/refactor/bulletproofing era and the current investigation-driven one. Everything before v3.45.0 lives in `CHANGELOG-ARCHIVE.md`, unedited; every substantial multi-bug investigation from that range that didn't already have a wiki page got one — see [The Complexity Refactor Campaign](The-Complexity-Refactor-Campaign).
 - ⬜ The README stays lean going forward — deep-dive material gets added here instead of growing the README further
 
+## Post-Audit Optimization & Observability — complete
+
+The v3.51.1 external function-by-function review and the two releases implementing everything it recommended, plus the first of the original four design documents to ship:
+
+- ✅ **v3.52.0** — the `/search` `route_query()` redesign (no wasted pre-route LLM call for compound queries; `cached`/`fallback_occurred` recorded at the code points where they genuinely happen via the `_ROUTE_STATS` ContextVar channel), parallel decomposed sub-queries (`DECOMPOSE_MAX_PARALLEL`), persistent HTTP sessions for every source module, FreshRSS token caching with 401 self-healing, batched routing-cache persistence with clean-shutdown flushing, WAL-consistent `/backup`, the Kiwix Wikipedia-bonus scoring fix, the conditional-remainder proper-noun-pair guard, and the SQLite connection-leak sweep. Benchmarked: zero failures across 1741 requests; warm aggregated p95 54ms, a new project best.
+- ✅ **v3.53.0 — [Semantic Routing Cache](Semantic-Routing-Cache)** — embedding-based reuse of routing decisions across rephrasings, targeting the last avoidable routing-path latency (the ~200–700ms cold LLM call for a query the exact-match cache has seen only in different words). Opt-in via `EMBEDDING_MODEL`; conservative similarity threshold; decisions always read from the live routing cache.
+- ✅ **v3.53.0 — [Explanation Chains](Explanation-Chains)** — `/search` `explain=true` returns the ordered trace of what routing actually did, built as more keys in the v3.52.0 stats channel rather than the signature-threading the original design doc assumed. First of the four original design documents to ship.
+
 ## Known limitations (tracked, accepted, not blocking)
 
 These are real, understood boundaries — not bugs waiting for a fix, but deliberate scope decisions or honest, accepted ceilings. A reader-facing version of this same list, written for evaluating fit rather than tracking status, lives at [Known Limitations](Known-Limitations):
