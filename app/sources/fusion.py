@@ -5,6 +5,7 @@ Queries multiple sources concurrently and merges results.
 import logging
 import contextvars
 import concurrent.futures
+import re
 from app.config import settings
 
 _LOGGER = logging.getLogger(__name__)
@@ -467,12 +468,38 @@ _HEADER_LABELS = {
 }
 
 
+# The separator between the source tag and its descriptive label inside a
+# section header. A named constant rather than a literal inside
+# _format_header()'s f-string because HEADER_PATTERN below must match
+# EXACTLY what _format_header() writes — the two are built from the same
+# constant so a format change here cannot silently drift away from the
+# parser that reads it. The _looks_empty() cross-file-drift bug (two
+# independently-maintained copies of "the same" logic diverging until a
+# real fallback stopped firing — see _looks_empty()'s own docstring) is
+# the cautionary tale this constant exists to prevent repeating.
+HEADER_SEPARATOR = " — "
+
+# Matches any header _format_header() can produce — including headers for
+# sources not in _HEADER_LABELS, whose label is just source.upper(), which
+# is why the label side is "anything up to the closing bracket" rather
+# than an alternation over the known labels. Exported for
+# app/synthesis.py's section parser (attributed prompt assembly); also
+# exercised by a dedicated drift test that formats a real header and
+# asserts this pattern matches it, so a change to either side fails
+# loudly in the suite rather than quietly in a synthesized answer's
+# attribution.
+HEADER_PATTERN = re.compile(
+    r"^\[([A-Z][A-Z0-9_]*)" + re.escape(HEADER_SEPARATOR) + r"[^\]\n]*\]",
+    re.MULTILINE,
+)
+
+
 def _format_header(source: str) -> str:
     """Build a fusion section header. Includes a descriptive label to prevent
     the LLM from cross-referencing unrelated sections (e.g. inferring location
     from a news article when reading the forecast section)."""
     label = _HEADER_LABELS.get(source, source.upper())
-    return f"[{source.upper()} — {label}]"
+    return f"[{source.upper()}{HEADER_SEPARATOR}{label}]"
 
 
 def search(query: str, sources: list[str] | None = None) -> str:

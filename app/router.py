@@ -2262,9 +2262,24 @@ class RouteOutcome(NamedTuple):
     success: bool
     error: str | None
     explanation: list[dict]
+    # Grounded answer synthesis (Design Doc 4) — populated only when the
+    # request opted in via synthesize=true AND synthesis produced a real
+    # answer. answer is None on every skip/failure, in which case the
+    # caller falls back to `result`, byte-identical to today. synthesized
+    # is True iff answer is not None; answer_sources names the section
+    # tags the answer drew on.
+    answer: str | None = None
+    answer_sources: list[str] = []
+    synthesized: bool = False
 
 
-def route_query(query: str, source: str = "auto", fusion_sources: list[str] | None = None) -> RouteOutcome:
+def route_query(
+    query: str,
+    source: str = "auto",
+    fusion_sources: list[str] | None = None,
+    synthesize: bool = False,
+    answer_style: str = "brief",
+) -> RouteOutcome:
     """The /search entry point: run route_with_source() with a per-request
     stats channel installed, and return the result together with what
     genuinely happened — whether the response was served entirely from
@@ -2279,6 +2294,13 @@ def route_query(query: str, source: str = "auto", fusion_sources: list[str] | No
     pre-check semantics; for a decomposed query it's strictly more
     honest than the old behavior (which checked a cache key that never
     corresponds to anything the decomposition path actually does).
+
+    When `synthesize` is True, grounded answer synthesis (Design Doc 4)
+    runs AFTER route_with_source() returns, inside this same _ROUTE_STATS
+    context so its explanation events land in the chain. It only ever
+    populates the answer/answer_sources/synthesized fields; the `result`
+    field is left exactly as retrieval produced it, so a synthesis skip
+    or failure leaves the caller with today's exact response.
 
     Never raises: an unexpected exception from routing is caught here
     and reported as success=False with the intended source preserved
@@ -2302,6 +2324,17 @@ def route_query(query: str, source: str = "auto", fusion_sources: list[str] | No
     try:
         result, source_used = route_with_source(query, source, fusion_sources)
         cached = stats["served_any_from_cache"] and not stats["invoked_any_source"]
+        answer: str | None = None
+        answer_sources: list[str] = []
+        synthesized = False
+        if synthesize:
+            # Imported here, not at module top: synthesis imports router's
+            # cache/event helpers, so a top-level import would be circular.
+            from app import synthesis
+            outcome = synthesis.synthesize(query, result, source_used, answer_style)
+            answer = outcome.answer
+            answer_sources = outcome.answer_sources
+            synthesized = outcome.synthesized
         return RouteOutcome(
             result=result,
             source_used=source_used,
@@ -2310,6 +2343,9 @@ def route_query(query: str, source: str = "auto", fusion_sources: list[str] | No
             success=True,
             error=None,
             explanation=stats["events"],
+            answer=answer,
+            answer_sources=answer_sources,
+            synthesized=synthesized,
         )
     except Exception as e:
         # Report the source this query was actually headed to when it
@@ -2329,6 +2365,9 @@ def route_query(query: str, source: str = "auto", fusion_sources: list[str] | No
             # The partial chain of what ran BEFORE the failure — a trace
             # earns its keep most on exactly this path.
             explanation=stats["events"],
+            answer=None,
+            answer_sources=[],
+            synthesized=False,
         )
     finally:
         _ROUTE_STATS.reset(token)

@@ -4907,3 +4907,84 @@ class TestDecomposedSubQueriesRunConcurrently:
         assert len(_cache) == 0, (
             f"synthetic sub-query results leaked into the result cache: {list(_cache)}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Grounded answer synthesis wired through route_query() (Design Doc 4)
+# ---------------------------------------------------------------------------
+
+class TestRouteQuerySynthesis:
+    """route_query() runs synthesis after route_with_source() inside the
+    same _ROUTE_STATS context. The raw `result` must be untouched whether
+    or not synthesis ran (constraint #1); the answer fields carry the
+    synthesized output."""
+
+    def setup_method(self):
+        from unittest.mock import patch
+        import app.router as router_module
+        from app.config import settings
+        self.router_module = router_module
+        self.settings = settings
+        self._orig = (settings.synthesis_enabled, settings.llm_url, settings.llm_model,
+                      settings.synthesis_min_input_chars)
+        settings.synthesis_enabled = True
+        settings.llm_url = "http://test-llm"
+        settings.llm_model = "qwen3:8b"
+        settings.synthesis_min_input_chars = 50
+        self._save = patch("app.router._save_cache")
+        self._save.start()
+        self._orig_map = dict(router_module.SOURCE_MAP)
+        router_module.clear_cache()
+
+    def teardown_method(self):
+        self.router_module.SOURCE_MAP.clear()
+        self.router_module.SOURCE_MAP.update(self._orig_map)
+        self.router_module.clear_cache()
+        self._save.stop()
+        (self.settings.synthesis_enabled, self.settings.llm_url, self.settings.llm_model,
+         self.settings.synthesis_min_input_chars) = self._orig
+
+    def test_synthesize_false_leaves_answer_fields_empty(self):
+        from unittest.mock import patch
+        from app.router import route_query
+        self.router_module.SOURCE_MAP["forecast"] = lambda q: "It will be sunny and warm all week long here."
+        with patch("app.llm.generate") as gen:
+            outcome = route_query("weather", "forecast", synthesize=False)
+        gen.assert_not_called()
+        assert outcome.answer is None
+        assert outcome.synthesized is False
+        assert outcome.answer_sources == []
+
+    def test_synthesize_true_populates_answer_and_keeps_result(self):
+        from unittest.mock import patch
+        from app.router import route_query
+        raw = "The forecast calls for clear skies and mild temperatures throughout the week."
+        self.router_module.SOURCE_MAP["forecast"] = lambda q: raw
+        with patch("app.llm.generate", return_value="Clear and mild all week. (forecast)"):
+            outcome = route_query("weather", "forecast", synthesize=True, answer_style="voice")
+        # Raw result is byte-identical to what retrieval produced.
+        assert outcome.result == raw
+        assert outcome.synthesized is True
+        assert outcome.answer.endswith("(forecast)")
+        assert outcome.answer_sources == ["forecast"]
+
+    def test_synthesis_events_land_in_explanation_chain(self):
+        from unittest.mock import patch
+        from app.router import route_query
+        self.router_module.SOURCE_MAP["forecast"] = lambda q: "Clear skies expected across the whole region today."
+        with patch("app.llm.generate", return_value="Clear skies today. (forecast)"):
+            outcome = route_query("weather", "forecast", synthesize=True)
+        steps = [e["step"] for e in outcome.explanation]
+        assert "synthesis_invoked" in steps
+
+    def test_synthesis_failure_leaves_raw_result_intact(self):
+        from unittest.mock import patch
+        from app.router import route_query
+        raw = "The forecast calls for clear skies and mild temperatures throughout the week."
+        self.router_module.SOURCE_MAP["forecast"] = lambda q: raw
+        # generate returns None (timeout) — gate 1 rejects, answer null.
+        with patch("app.llm.generate", return_value=None):
+            outcome = route_query("weather", "forecast", synthesize=True)
+        assert outcome.result == raw
+        assert outcome.answer is None
+        assert outcome.synthesized is False

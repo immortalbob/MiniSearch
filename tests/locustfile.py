@@ -193,6 +193,28 @@ AUTO_QUERIES = [
     "is the network up",
 ]
 
+# Grounded answer synthesis (Design Doc 4) benchmark pool. This feature
+# adds a REAL LLM generation to the request path — a multi-sentence
+# compose, not a one-token routing pick — so its cost must show up in its
+# OWN named bucket rather than smeared into [auto]. These are all
+# genuinely synthesizable definitional/current-events shapes (they pass
+# the min-input and non-empty pre-flight gates and produce a real answer
+# rather than a NOT_IN_SOURCES miss), so the bucket measures the true
+# generation cost, not the cheap skip path. Kept deliberately separate
+# from AUTO_QUERIES so the two distributions are directly comparable in
+# the results table: [synthesize] minus [auto] is the honest marginal
+# cost of the synthesis stage on this hardware.
+SYNTHESIS_TOPICS = [
+    "what is nitrogen",
+    "what is a galaxy",
+    "what is the new deal",
+    "what is photosynthesis",
+    "what is a black hole",
+    "what is machine learning",
+    "explain how a transistor works",
+    "what is the theory of relativity",
+]
+
 FUSION_QUERIES = [
     ("what is the weather and are my services up", ["forecast", "uptime"]),
     ("latest news and weather forecast", ["news", "forecast"]),
@@ -518,6 +540,21 @@ class MnemolisSingleSourceUser(HttpUser):
             "query": CACHE_HIT_QUERY,
             "source": "kiwix"
         }, name="/search [cache_hit]")
+
+    @task(2)
+    def synthesize(self):
+        """Grounded answer synthesis (Design Doc 4) — auto-routed queries
+        with synthesize=true, in their own bucket so the added LLM
+        generation cost is measured honestly against [auto] rather than
+        hidden inside it. Requires SYNTHESIS_ENABLED on the server under
+        test; when it's off, this bucket measures the near-free
+        synthesis_skipped path instead (also worth knowing)."""
+        self.client.post("/search", json={
+            "query": random.choice(SYNTHESIS_TOPICS),
+            "source": "auto",
+            "synthesize": True,
+            "answer_style": "brief",
+        }, name="/search [synthesize]")
 
     @task(1)
     def health_check(self):

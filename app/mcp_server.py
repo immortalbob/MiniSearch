@@ -66,7 +66,7 @@ import logging
 from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp.server import TransportSecuritySettings
 
-from app.router import route
+from app.router import route, route_query
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -92,6 +92,8 @@ async def search(
     query: str,
     source: str = "auto",
     fusion_sources: list[str] | None = None,
+    synthesize: bool = False,
+    answer_style: str = "brief",
 ) -> str:
     """Search across local and remote knowledge sources via Mnemolis.
 
@@ -109,7 +111,33 @@ async def search(
         fusion_sources: Optional list of source names to fuse. Only used
             when source='fusion'. If omitted, the LLM picks the best 2-3
             sources automatically.
+        synthesize: When true (and the server has SYNTHESIS_ENABLED set),
+            the local LLM composes a short, grounded answer from the
+            retrieved material and returns THAT instead of the raw
+            source text. If synthesis is skipped, fails, or is disabled,
+            the raw retrieved result is returned unchanged — this
+            argument can only ever improve the reply, never degrade it.
+        answer_style: Length of the synthesized answer when synthesize is
+            true. One of: 'voice' (≤2 sentences, for text-to-speech),
+            'brief' (one short paragraph, default), 'detailed'.
     """
+    _LOGGER.info("MCP search: query=%r source=%r synthesize=%r", query[:80], source, synthesize)
+
+    if synthesize:
+        # route_query() runs synthesis inside its own stats context and
+        # returns both the raw result and the synthesized answer. Return
+        # the answer when one was produced, otherwise fall back to the
+        # raw result — the same `answer ?? result` contract the voice
+        # pipeline uses (Design Doc 4 constraint #1). Unlike route()
+        # below, route_query() never raises (it catches and reports
+        # failure in-band), so a routing bug surfaces here as an error
+        # string rather than an MCP protocol-level isError — an
+        # acceptable, documented difference on this opt-in path.
+        outcome = await asyncio.to_thread(
+            route_query, query, source, fusion_sources, synthesize, answer_style
+        )
+        return outcome.answer if outcome.answer is not None else outcome.result
+
     # No try/except here — deliberate. route() already returns descriptive
     # strings for all expected, recoverable failures (source not configured,
     # empty results, unknown source name) rather than raising, so those are
@@ -123,7 +151,6 @@ async def search(
     # was the tracked gap in the roadmap and wiki/MCP-Server.md. Confirmed
     # directly: asyncio.to_thread propagates exceptions correctly, and the
     # SDK's CallToolRequest handler catches them and calls _make_error_result.
-    _LOGGER.info("MCP search: query=%r source=%r", query[:80], source)
     result = await asyncio.to_thread(route, query, source, fusion_sources)
     return result
 

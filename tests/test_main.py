@@ -1161,3 +1161,162 @@ class TestLifespanMountRefresh:
         assert "No Mount route found" in mock_logger.warning.call_args[0][0]
 
 
+
+
+class TestSearchSynthesis:
+    """/search grounded answer synthesis surface (Design Doc 4).
+
+    Additive contract: with synthesize omitted or false, the response is
+    byte-identical on its pre-existing fields and the new answer fields
+    are null/[]/false. With synthesize=true, answer/answer_sources/
+    synthesized carry the synthesized output and `result` is untouched.
+    """
+
+    def setup_method(self):
+        from app.main import _LOG_DB
+        con = sqlite3.connect(_LOG_DB)
+        con.execute("DELETE FROM query_log")
+        con.commit()
+        con.close()
+        from app.config import settings
+        self.settings = settings
+        self._orig = (settings.synthesis_enabled, settings.llm_url, settings.llm_model,
+                      settings.synthesis_min_input_chars)
+        settings.synthesis_enabled = True
+        settings.llm_url = "http://test-llm"
+        settings.llm_model = "qwen3:8b"
+        settings.synthesis_min_input_chars = 40
+
+    def teardown_method(self):
+        (self.settings.synthesis_enabled, self.settings.llm_url, self.settings.llm_model,
+         self.settings.synthesis_min_input_chars) = self._orig
+
+    def _mock_forecast(self, text):
+        import app.router as router_module
+        original_map = dict(router_module.SOURCE_MAP)
+        router_module.SOURCE_MAP["forecast"] = lambda q: text
+        return original_map
+
+    def test_default_request_has_null_answer_fields(self, client):
+        import app.router as router_module
+        original_map = self._mock_forecast("Clear skies and mild temperatures all week across the region.")
+        try:
+            resp = client.post("/search", json={"query": "weather please", "source": "forecast"})
+        finally:
+            router_module.SOURCE_MAP.update(original_map)
+        body = resp.json()
+        assert body["answer"] is None
+        assert body["answer_sources"] == []
+        assert body["synthesized"] is False
+
+    def test_synthesize_true_returns_answer_and_intact_result(self, client):
+        import app.router as router_module
+        from unittest.mock import patch
+        raw = "Clear skies and mild temperatures are expected all week across the region."
+        original_map = self._mock_forecast(raw)
+        try:
+            with patch("app.llm.generate", return_value="Clear and mild all week. (forecast)"):
+                resp = client.post("/search", json={
+                    "query": "weather please", "source": "forecast",
+                    "synthesize": True, "answer_style": "voice",
+                })
+        finally:
+            router_module.SOURCE_MAP.update(original_map)
+        body = resp.json()
+        assert body["result"] == raw           # untouched
+        assert body["synthesized"] is True
+        assert body["answer"].endswith("(forecast)")
+        assert body["answer_sources"] == ["forecast"]
+
+    def test_synthesize_timeout_leaves_result_and_nulls_answer(self, client):
+        import app.router as router_module
+        from unittest.mock import patch
+        raw = "Clear skies and mild temperatures are expected all week across the region."
+        original_map = self._mock_forecast(raw)
+        try:
+            with patch("app.llm.generate", return_value=None):
+                resp = client.post("/search", json={
+                    "query": "weather please", "source": "forecast", "synthesize": True,
+                })
+        finally:
+            router_module.SOURCE_MAP.update(original_map)
+        body = resp.json()
+        assert body["result"] == raw
+        assert body["answer"] is None
+        assert body["synthesized"] is False
+
+    def test_logs_stats_counts_served_and_requested(self, client):
+        import app.router as router_module
+        from unittest.mock import patch
+        raw = "Clear skies and mild temperatures are expected all week across the region."
+        original_map = self._mock_forecast(raw)
+        try:
+            with patch("app.llm.generate", return_value="Clear and mild. (forecast)"):
+                client.post("/search", json={
+                    "query": "weather one", "source": "forecast", "synthesize": True,
+                })
+            # A non-synthesis request must NOT count toward requested.
+            client.post("/search", json={"query": "weather two", "source": "forecast"})
+        finally:
+            router_module.SOURCE_MAP.update(original_map)
+        stats = client.get("/logs/stats").json()
+        assert "synthesis" in stats
+        assert stats["synthesis"]["requested"] == 1
+        assert stats["synthesis"]["served"] == 1
+
+    def test_logs_stats_counts_not_in_sources(self, client):
+        import app.router as router_module
+        from unittest.mock import patch
+        raw = "Some retrieved material that does not contain the specific answer being asked for here."
+        original_map = self._mock_forecast(raw)
+        try:
+            with patch("app.llm.generate", return_value="NOT_IN_SOURCES"):
+                client.post("/search", json={
+                    "query": "unanswerable", "source": "forecast", "synthesize": True,
+                })
+        finally:
+            router_module.SOURCE_MAP.update(original_map)
+        stats = client.get("/logs/stats").json()
+        assert stats["synthesis"]["not_in_sources"] == 1
+        assert stats["synthesis"]["served"] == 0
+
+
+class TestLogDbSynthesizedMigration:
+    """The synthesized-column migration is idempotent and safe against a
+    pre-existing table that lacks the column (the established caught-ALTER
+    pattern for this DB)."""
+
+    def test_migration_adds_column_to_legacy_table(self):
+        import tempfile
+        import os
+        from unittest.mock import patch
+        from app.main import _init_log_db, _connect
+        with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+            db = f.name
+        try:
+            # Build a legacy table WITHOUT the synthesized column.
+            con = _connect(db)
+            con.execute("""
+                CREATE TABLE query_log (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp TEXT NOT NULL,
+                    query TEXT NOT NULL,
+                    source_requested TEXT NOT NULL,
+                    source_used TEXT NOT NULL,
+                    cached INTEGER NOT NULL,
+                    success INTEGER NOT NULL,
+                    latency_ms INTEGER NOT NULL
+                )
+            """)
+            con.commit()
+            con.close()
+            with patch("app.main._LOG_DB", db):
+                _init_log_db()
+                _init_log_db()  # run twice — must be idempotent
+            con = _connect(db)
+            cols = [r[1] for r in con.execute("PRAGMA table_info(query_log)").fetchall()]
+            con.close()
+            assert "synthesized" in cols
+            assert "fallback_occurred" in cols
+        finally:
+            os.unlink(db)

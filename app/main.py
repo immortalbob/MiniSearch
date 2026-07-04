@@ -166,7 +166,8 @@ def _init_log_db():
                     cached INTEGER NOT NULL,
                     success INTEGER NOT NULL,
                     latency_ms INTEGER NOT NULL,
-                    fallback_occurred INTEGER NOT NULL DEFAULT 0
+                    fallback_occurred INTEGER NOT NULL DEFAULT 0,
+                    synthesized INTEGER
                 )
             """)
             # Migration for tables created before fallback_occurred existed —
@@ -177,18 +178,37 @@ def _init_log_db():
                 con.execute("ALTER TABLE query_log ADD COLUMN fallback_occurred INTEGER NOT NULL DEFAULT 0")
             except Exception:
                 pass  # column already exists
+            # Migration for the synthesized flag (Design Doc 4) — nullable
+            # so pre-synthesis rows read as NULL ("synthesis wasn't a
+            # concept then") rather than a misleading 0 ("synthesis ran and
+            # was skipped"). Guarded by the same defensive try/except; a
+            # PRAGMA table_info check would work equally, but the caught
+            # ALTER is the established pattern for this DB.
+            try:
+                con.execute("ALTER TABLE query_log ADD COLUMN synthesized INTEGER")
+            except Exception:
+                pass  # column already exists
             con.commit()
     except Exception as e:
         _LOGGER.warning("Could not initialize query log db: %s", e)
 
 
-def _log_query(query: str, source_requested: str, source_used: str, cached: bool, success: bool, latency_ms: int, fallback_occurred: bool = False):
-    """Write a query log entry."""
+def _log_query(query: str, source_requested: str, source_used: str, cached: bool, success: bool, latency_ms: int, fallback_occurred: bool = False, synthesized: int | None = None):
+    """Write a query log entry.
+
+    `synthesized` is a nullable status code, not a bare boolean, because
+    /logs/stats needs to tell four synthesis outcomes apart from this one
+    column: NULL = synthesis not requested; 1 = a real grounded answer
+    was served; 2 = the honest NOT_IN_SOURCES miss (a success, but no
+    sources); 0 = requested but skipped or gate-rejected (no answer). A
+    pre-synthesis row reads NULL, which is correct — synthesis wasn't a
+    concept when it was written.
+    """
     try:
         with closing(_connect(_LOG_DB)) as con:
             con.execute(
-                "INSERT INTO query_log (timestamp, query, source_requested, source_used, cached, success, latency_ms, fallback_occurred) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                (time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), query, source_requested, source_used, int(cached), int(success), latency_ms, int(fallback_occurred))
+                "INSERT INTO query_log (timestamp, query, source_requested, source_used, cached, success, latency_ms, fallback_occurred, synthesized) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), query, source_requested, source_used, int(cached), int(success), latency_ms, int(fallback_occurred), synthesized)
             )
             con.commit()
     except Exception as e:
@@ -351,7 +371,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Mnemolis",
     description="Unified local knowledge search API with multi-source fusion. Routes queries to Kiwix, Open-Meteo, FreshRSS, SearXNG, Uptime Kuma, or multiple sources concurrently.",
-    version="3.54.2",
+    version="3.55.0",
     lifespan=lifespan,
 )
 
@@ -370,6 +390,17 @@ class SearchRequest(BaseModel):
     # always-null key and nothing else changes. See
     # wiki/Explanation-Chains.md.
     explain: bool = False
+    # Grounded answer synthesis (Design Doc 4) — when true (and
+    # SYNTHESIS_ENABLED is set), the local LLM composes a short, grounded
+    # answer from the retrieved material and returns it in the separate
+    # `answer` field ALONGSIDE the raw `result`, never instead of it. Off
+    # by default and additive: without it the answer/answer_sources/
+    # synthesized fields are null/false and the response is byte-identical
+    # to today's. answer_style controls length: "voice" (≤2 sentences,
+    # for TTS), "brief" (one short paragraph, default), "detailed". See
+    # wiki/Answer-Synthesis.md.
+    synthesize: bool = False
+    answer_style: str = "brief"
 
 
 class SearchResponse(BaseModel):
@@ -381,6 +412,13 @@ class SearchResponse(BaseModel):
     error: Optional[str] = None
     # Present only when the request set explain=true — see SearchRequest.
     explanation: Optional[list[dict]] = None
+    # Grounded answer synthesis — see SearchRequest.synthesize. answer is
+    # null on every skip/failure (the raw `result` is always intact);
+    # answer_sources names the sources the answer drew on; synthesized is
+    # true iff answer is non-null.
+    answer: Optional[str] = None
+    answer_sources: list[str] = []
+    synthesized: bool = False
 
 
 def _check_kiwix() -> dict:
@@ -634,12 +672,29 @@ def search(request: SearchRequest):
     # _ROUTE_STATS comment in app/router.py for the mechanism and why
     # route_with_source()'s own signature deliberately stays unchanged.
     start = time.monotonic()
-    outcome = route_query(request.query, request.source, request.fusion_sources)
+    outcome = route_query(
+        request.query, request.source, request.fusion_sources,
+        synthesize=request.synthesize, answer_style=request.answer_style,
+    )
     latency_ms = int((time.monotonic() - start) * 1000)
+
+    # Nullable synthesis status for /logs/stats — see _log_query's
+    # docstring. The honest NOT_IN_SOURCES miss is distinguished from a
+    # real served answer by its empty answer_sources (a served answer
+    # always carries at least one source tag).
+    if not request.synthesize:
+        synth_status: int | None = None
+    elif outcome.synthesized and outcome.answer_sources:
+        synth_status = 1  # served a real grounded answer
+    elif outcome.synthesized:
+        synth_status = 2  # honest NOT_IN_SOURCES miss
+    else:
+        synth_status = 0  # requested but skipped / gate-rejected
 
     _log_query(
         request.query, request.source, outcome.source_used,
         outcome.cached, outcome.success, latency_ms, outcome.fallback_occurred,
+        synthesized=synth_status,
     )
     if not outcome.success:
         _LOGGER.error("Search failed for query '%s': %s", request.query, outcome.error)
@@ -655,6 +710,12 @@ def search(request: SearchRequest):
         # trace of what ran before things broke, which is when a trace
         # earns its keep most.
         explanation=outcome.explanation if request.explain else None,
+        # Additive synthesis fields — null/[]/false unless synthesize=true
+        # produced a real answer; the raw `result` above is untouched
+        # regardless (Design Doc 4 constraint #1).
+        answer=outcome.answer,
+        answer_sources=outcome.answer_sources,
+        synthesized=outcome.synthesized,
     )
 
 
@@ -1272,6 +1333,32 @@ def query_log_stats():
             SELECT COUNT(DISTINCT LOWER(TRIM(query))) FROM query_log
         """).fetchone()[0] or 0
 
+        # Synthesis counters (Design Doc 4) — derived from the nullable
+        # `synthesized` status column: NULL = not requested (excluded
+        # here), 1 = served a real answer, 2 = honest NOT_IN_SOURCES miss,
+        # 0 = requested but skipped/gate-rejected. `requested` is every
+        # non-NULL row. Guarded so a database predating the column (its
+        # ALTER not yet run) reports zeros rather than raising.
+        try:
+            srow = con.execute("""
+                SELECT
+                    SUM(CASE WHEN synthesized IS NOT NULL THEN 1 ELSE 0 END),
+                    SUM(CASE WHEN synthesized = 1 THEN 1 ELSE 0 END),
+                    SUM(CASE WHEN synthesized = 2 THEN 1 ELSE 0 END),
+                    SUM(CASE WHEN synthesized = 0 THEN 1 ELSE 0 END)
+                FROM query_log
+            """).fetchone()
+            synthesis_stats = {
+                "requested": srow[0] or 0,
+                "served": srow[1] or 0,
+                "not_in_sources": srow[2] or 0,
+                "rejected_or_skipped": srow[3] or 0,
+            }
+        except Exception:
+            synthesis_stats = {
+                "requested": 0, "served": 0, "not_in_sources": 0, "rejected_or_skipped": 0,
+            }
+
         return {
             "total_queries": total,
             "unique_queries": unique,
@@ -1285,6 +1372,7 @@ def query_log_stats():
             "latency_by_source": latency_by_source,
             "fallback_by_target": fallback_by_target,
             "top_queries": top_queries,
+            "synthesis": synthesis_stats,
         }
 
     except Exception as e:

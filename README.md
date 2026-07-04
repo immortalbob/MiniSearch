@@ -155,6 +155,12 @@ All settings are passed as environment variables in `docker-compose.yml`:
 | `EMBEDDING_MODEL` | Embedding model for the [semantic routing cache](https://github.com/immortalbob/Mnemolis/wiki/Semantic-Routing-Cache) — reuses routing decisions across rephrasings of the same question, skipping the cold LLM routing call. Blank disables the feature entirely (zero behavior change). On Ollama: `ollama pull nomic-embed-text`, then set this to match | _(blank — disabled)_ |
 | `EMBEDDING_URL` | Backend serving the embedding model. Blank = same as `LLM_URL` | _(blank — uses `LLM_URL`)_ |
 | `SEMANTIC_ROUTING_THRESHOLD` | Cosine-similarity floor for reusing another query's routing decision. Deliberately conservative — a wrong reuse silently misroutes | `0.92` |
+| `SYNTHESIS_ENABLED` | Master switch for [grounded answer synthesis](https://github.com/immortalbob/Mnemolis/wiki/Answer-Synthesis) — opt-in, per-request LLM composition of a short answer *from the retrieved material only*, returned in a separate `answer` field alongside the raw `result`. Additive: off (or a request that doesn't ask) leaves the response byte-identical. While false, `synthesize=true` is a no-op | `false` |
+| `SYNTHESIS_TIMEOUT_SECONDS` | Synthesis generation timeout — its own budget, independent of the routing call's. On timeout, `answer` is null and `result` is untouched | `20` |
+| `SYNTHESIS_MODEL` | Blank = `LLM_MODEL`. Set to run a larger instruct model for synthesis while routing uses a smaller, faster one on the same backend | _(blank — uses `LLM_MODEL`)_ |
+| `SYNTHESIS_INPUT_BUDGET_CHARS` | Retrieved-material characters offered to the synthesis prompt, apportioned across sections | `6000` |
+| `SYNTHESIS_MIN_INPUT_CHARS` | Results shorter than this skip synthesis (a one-line HA state answer is already ideal for voice) — exempts most `ha`/`uptime` traffic | `200` |
+| `SYNTHESIS_MAX_CHARS` / `SYNTHESIS_VOICE_MAX_CHARS` | `answer_style` length ceilings: `detailed` / `voice`. `brief` (default style) is fixed at 800 | `2000` / `400` |
 | `MORNING_START_HOUR` | Reference hour (0-23, local time) for resolving "this morning" in changes queries | `6` |
 | `WORK_START_HOUR` | Reference hour (0-23, local time) for resolving "while at work" in changes queries | `9` |
 | `API_KEYS` | Comma-separated list of valid API keys. Protects `POST /search` and `GET /changes`. | _(blank — auth disabled)_ |

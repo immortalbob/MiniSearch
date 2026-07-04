@@ -235,6 +235,88 @@ def _complete_openai(prompt: str, max_tokens: int, temperature: float) -> str | 
 
 
 # ---------------------------------------------------------------------------
+# Full generations — for answer synthesis
+# ---------------------------------------------------------------------------
+
+def generate(
+    prompt: str,
+    max_tokens: int = 512,
+    temperature: float = 0.1,
+    timeout: int = 20,
+    model: str | None = None,
+) -> str | None:
+    """Send a prompt expecting a full, multi-sentence generation and
+    return the response text, or None on any failure.
+
+    Deliberately a separate entry point from complete(), not a
+    parameter on it, because complete()'s post-processing is actively
+    WRONG for a real generation and exists specifically for one-token
+    routing picks:
+
+    - complete() strips trailing periods (`.strip(".")`) so a routing
+      answer like "kiwix." normalizes to "kiwix" — applied to a real
+      answer it amputates the final sentence's punctuation.
+    - complete()'s empty-response fallback takes the LAST LINE of the
+      model's hidden thinking field — a reasonable salvage when the
+      expected answer is one word, but for a synthesized answer the
+      last line of chain-of-thought is exactly the kind of ungrounded
+      text the synthesis gates exist to keep out. Here an empty
+      response is honestly returned as None instead (gate 1 rejects it
+      and the caller gets today's exact behavior), never salvaged.
+    - complete()'s timeout is a hardcoded 10s sized for routing picks;
+      a synthesis generation gets its own caller-supplied budget.
+
+    `model` overrides settings.llm_model when set (SYNTHESIS_MODEL's
+    split-model support); backend selection, keep_alive handling, and
+    the persistent session are identical to complete()'s — see those
+    functions' comments for the reasoning behind each.
+    """
+    if not is_configured():
+        return None
+
+    use_model = model or settings.llm_model
+    api_type = settings.llm_api_type.lower().strip()
+
+    try:
+        if api_type == "openai":
+            resp = _session.post(
+                f"{settings.llm_url}/v1/chat/completions",
+                json={
+                    "model": use_model,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "max_tokens": max_tokens,
+                    "temperature": temperature,
+                    "stream": False,
+                },
+                timeout=timeout,
+            )
+            resp.raise_for_status()
+            choices = resp.json().get("choices", [])
+            if not choices:
+                return None
+            raw = choices[0].get("message", {}).get("content", "") or ""
+        else:
+            resp = _session.post(
+                f"{settings.llm_url}/api/generate",
+                json={
+                    "model": use_model,
+                    "prompt": prompt,
+                    "stream": False,
+                    "think": False,
+                    "keep_alive": settings.llm_keep_alive,
+                    "options": {"temperature": temperature, "num_predict": max_tokens},
+                },
+                timeout=timeout,
+            )
+            resp.raise_for_status()
+            raw = resp.json().get("response", "") or ""
+        return raw.strip() or None
+    except Exception as e:
+        _LOGGER.warning("LLM generation failed (%s): %s", api_type, e)
+        return None
+
+
+# ---------------------------------------------------------------------------
 # Embeddings — for the semantic routing cache
 # ---------------------------------------------------------------------------
 

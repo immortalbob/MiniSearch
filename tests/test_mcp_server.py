@@ -348,3 +348,60 @@ class TestRealClientFindings:
         with TestClient(app, base_url="http://192.168.1.50:8888") as client:
             resp = client.get("/health")
         assert resp.status_code == 200
+
+
+class TestSynthesizeArgument:
+    """The MCP search tool's opt-in synthesize/answer_style arguments
+    (Design Doc 4). When synthesize is false the tool behaves exactly as
+    before (routes via route()); when true it routes via route_query()
+    and returns the synthesized answer, falling back to the raw result
+    when no answer is produced."""
+
+    def _run(self, coro):
+        return asyncio.run(coro)
+
+    def test_schema_exposes_synthesize_and_style(self):
+        from app.mcp_server import mcp
+        tools = self._run(mcp.list_tools())
+        props = tools[0].inputSchema["properties"]
+        assert "synthesize" in props
+        assert "answer_style" in props
+
+    def test_synthesize_false_uses_route_not_route_query(self):
+        from app.mcp_server import mcp
+        with patch("app.mcp_server.route", return_value="raw result") as mock_route, \
+             patch("app.mcp_server.route_query") as mock_rq:
+            content, _structured = self._run(
+                mcp.call_tool("search", {"query": "test", "synthesize": False})
+            )
+        mock_route.assert_called_once()
+        mock_rq.assert_not_called()
+        assert content[0].text == "raw result"
+
+    def test_synthesize_true_returns_answer_when_produced(self):
+        from app.mcp_server import mcp
+        from app.router import RouteOutcome
+        outcome = RouteOutcome(
+            result="raw source text", source_used="web", cached=False,
+            fallback_occurred=False, success=True, error=None, explanation=[],
+            answer="A short grounded answer. (web)", answer_sources=["web"], synthesized=True,
+        )
+        with patch("app.mcp_server.route_query", return_value=outcome):
+            content, _structured = self._run(
+                mcp.call_tool("search", {"query": "test", "synthesize": True, "answer_style": "voice"})
+            )
+        assert content[0].text == "A short grounded answer. (web)"
+
+    def test_synthesize_true_falls_back_to_raw_result_when_no_answer(self):
+        from app.mcp_server import mcp
+        from app.router import RouteOutcome
+        outcome = RouteOutcome(
+            result="raw source text", source_used="web", cached=False,
+            fallback_occurred=False, success=True, error=None, explanation=[],
+            answer=None, answer_sources=[], synthesized=False,
+        )
+        with patch("app.mcp_server.route_query", return_value=outcome):
+            content, _structured = self._run(
+                mcp.call_tool("search", {"query": "test", "synthesize": True})
+            )
+        assert content[0].text == "raw source text"

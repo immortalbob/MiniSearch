@@ -285,6 +285,55 @@ class Settings(BaseSettings):
     llm_keep_alive: str = "5m"
 
     # -------------------------------------------------------------------
+    # Grounded Answer Synthesis — opt-in LLM composition of a short,
+    # grounded answer from retrieved material (see Design Doc 4 and
+    # wiki/Answer-Synthesis.md). Additive by contract: the `result`
+    # field always carries the raw retrieved text whether or not
+    # synthesis ran; synthesis only ever populates the separate
+    # `answer` field, and any failure yields answer=null plus an
+    # explanation event, never a degraded result.
+    # -------------------------------------------------------------------
+    # Master switch, standard rollout contract: default false for one
+    # release, and while false the per-request `synthesize` flag becomes
+    # a no-op with a `synthesis_skipped: disabled` explanation event
+    # rather than silently running anyway.
+    synthesis_enabled: bool = False
+
+    # Timeout for the synthesis generation call — deliberately its own
+    # budget, independent of the routing call's hardcoded 10s: this is a
+    # real multi-sentence generation, not a one-token routing pick.
+    synthesis_timeout_seconds: int = 20
+
+    # Blank = use LLM_MODEL. Exists so routing can run a small, fast
+    # model while synthesis runs a larger instruct model on the same
+    # backend — the two calls have genuinely different quality/latency
+    # tradeoffs.
+    synthesis_model: str = ""
+
+    # Total characters of retrieved material offered to the synthesis
+    # prompt, apportioned proportionally across attributed sections.
+    # qwen3:8b at 32K context has room for far more; the budget keeps
+    # latency predictable and is configurable down for smaller models.
+    synthesis_input_budget_chars: int = 6000
+
+    # Results shorter than this skip synthesis entirely — a one-line HA
+    # state answer like "Front Door: locked" is already the ideal voice
+    # answer, and rewriting it can only add risk. This rule alone
+    # exempts most ha/uptime traffic, which is correct.
+    synthesis_min_input_chars: int = 200
+
+    # Per-style answer length ceilings (characters), enforced by
+    # sentence-boundary truncation as a backstop behind the prompt's own
+    # style instruction — length is a first-class request parameter for
+    # the voice pipeline, not a prompt suggestion alone. "brief" is
+    # fixed at 800 in app/synthesis.py (an internal middle point between
+    # these two real deployment-tunable extremes, per the config audit's
+    # own "not every internal sizing constant is a user preference"
+    # judgment).
+    synthesis_max_chars: int = 2000
+    synthesis_voice_max_chars: int = 400
+
+    # -------------------------------------------------------------------
     # Fusion — concurrency, payload size, and timeout limits
     # -------------------------------------------------------------------
     fusion_max_sources: int = 4

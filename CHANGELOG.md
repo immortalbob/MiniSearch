@@ -4,6 +4,29 @@ All notable changes to Mnemolis are documented here, from v3.45.0 onward. For ev
 
 ---
 
+## [3.55.0]
+
+### Added — Grounded Answer Synthesis (opt-in, off by default)
+
+Mnemolis retrieves; until now it never *answered*. Every response was source text — a truncated Kiwix article, a scored web-result list, a fused blob of `[SOURCE — DESCRIPTION]` sections — and turning that into an answer was the client's job. That's fine for Open WebUI and Claude Desktop; it's bad for the voice pipeline, where HA's TTS reads fused headers and headline excerpts aloud while the Beast's 4090 sits one hop away doing nothing but routing.
+
+New `synthesize=true` on `/search` (and the MCP `search` tool) has the local LLM compose a short, grounded answer **from the retrieved material only**, returned in a separate `answer` field **alongside** the raw `result` — never instead of it. `answer_style` ∈ `{voice, brief, detailed}` controls length (voice ≈ ≤2 sentences for TTS). See the new [`Answer-Synthesis.md`](../../wiki/Answer-Synthesis) wiki page and Design Doc 4.
+
+The whole feature is additive by contract. With `SYNTHESIS_ENABLED` false (the default for this release) or any request that doesn't opt in, the response is byte-identical to v3.54.2 and the three new fields (`answer`/`answer_sources`/`synthesized`) are `null`/`[]`/`false`. Any failure — timeout, empty reply, gate rejection, LLM unconfigured — yields `answer: null` plus a `synthesis_skipped`/`synthesis_rejected` explanation event, leaving the caller with exactly today's raw result.
+
+**Grounded or silent, enforced by gates, not hope.** Synthesis runs in `route_query()` after retrieval, inside the same `_ROUTE_STATS` context so its events join the explanation chain. Pre-flight skips the LLM call entirely for empty/error results, sub-200-char results (a one-line `"Front Door: locked"` is already the ideal voice answer — this exempts most `ha`/`uptime` traffic), and `changes` output (already prose). The generation then passes a stack of gates: empty-reply rejection; the honest `NOT_IN_SOURCES` → `"The retrieved sources don't answer this."` success path; attribution parse (multi-source answers that can't say who said what are rejected); echo guard; a **numeric-grounding** check (every number in the answer must appear in the material after comma-normalization, the current year exempted — a miss rejects and logs the offending token at WARNING, the live-verification hook); and a sentence-boundary length backstop per style.
+
+**Details worth noting:**
+- Header parsing reuses `fusion.HEADER_PATTERN`/`HEADER_SEPARATOR` — **exported** from `fusion.py`, not re-derived — so a header-format change can't drift the synthesis parser away from the producer (the `_looks_empty()` cross-file-drift bug is the cautionary tale; a drift test pins the contract).
+- New `llm.generate()` path, deliberately separate from `complete()`: `complete()`'s trailing-period stripping and last-line-of-thinking salvage are correct for one-token routing picks but actively wrong for a real answer, so `generate()` returns an empty response honestly as `None` (gate 1 rejects) rather than salvaging ungrounded chain-of-thought.
+- Synthesized answers cache under a source-led key so they inherit the underlying source's TTL and can never outlive the retrieval they ground; the `NOT_IN_SOURCES` miss is never cached (the [Cached Failure Bug found three times](../../wiki/The-Cached-Failure-Bug-Found-Three-Times)).
+- `/logs/stats` gains a `synthesis` block from a new nullable `synthesized` status column (migration-safe guarded `ALTER TABLE`); Locust gains a dedicated `[synthesize]` bucket so the added generation cost shows honestly against `[auto]`, not smeared into it.
+
+### Changed
+- Version bumped to 3.55.0. Test suite: 1508 passing (from 1453 at v3.54.2), ruff clean. New config: `SYNTHESIS_ENABLED`, `SYNTHESIS_TIMEOUT_SECONDS`, `SYNTHESIS_MODEL`, `SYNTHESIS_INPUT_BUDGET_CHARS`, `SYNTHESIS_MIN_INPUT_CHARS`, `SYNTHESIS_MAX_CHARS`, `SYNTHESIS_VOICE_MAX_CHARS`.
+
+---
+
 ## [3.54.2]
 
 ### Fixed — Disambiguation Candidates Replaced the Plain Search Term Instead of Adding to It

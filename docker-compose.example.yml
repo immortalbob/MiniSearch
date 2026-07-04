@@ -46,6 +46,20 @@ services:
       EMBEDDING_MODEL: ""             # e.g. nomic-embed-text
       EMBEDDING_URL: ""               # blank = same as LLM_URL
       SEMANTIC_ROUTING_THRESHOLD: "0.92"  # cosine-similarity floor; tune only after auditing with explain=true
+      # Grounded answer synthesis (optional) — when a client sets
+      # synthesize=true on /search (or the MCP search tool), the local
+      # LLM composes a short, grounded answer FROM the retrieved material
+      # and returns it in a separate `answer` field, alongside the raw
+      # result (never instead of it). Built for the voice pipeline, whose
+      # TTS otherwise reads fused headers and article boilerplate aloud.
+      # Leave SYNTHESIS_ENABLED false to make the per-request flag a no-op.
+      # Recommended: LLM_KEEP_ALIVE=30m on a dedicated Beast-class backend
+      # so voice synthesis never pays a model load.
+      # See https://github.com/immortalbob/Mnemolis/wiki/Answer-Synthesis
+      SYNTHESIS_ENABLED: "false"          # master switch; per-request synthesize=true is a no-op while false
+      SYNTHESIS_TIMEOUT_SECONDS: "20"     # own budget — a real generation, not a routing pick
+      SYNTHESIS_MODEL: ""                 # blank = LLM_MODEL; set to run a larger instruct model just for synthesis
+      SYNTHESIS_VOICE_MAX_CHARS: "400"    # answer_style=voice ceiling (≤2 sentences for TTS); brief is fixed 800
       FORECAST_LATITUDE: ""           # your latitude (e.g. 40.7128)
       FORECAST_LONGITUDE: ""          # your longitude (e.g. -74.0060)
       FORECAST_LOCATION_NAME: ""      # e.g. "New York, NY"
