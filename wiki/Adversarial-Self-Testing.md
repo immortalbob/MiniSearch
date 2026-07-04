@@ -73,7 +73,7 @@ Two real, structural latency-variance mechanisms were also found and fixed at th
 
 | Setting | Default | What it controls |
 |---|---|---|
-| `ADVERSARIAL_TEST_ENABLED` | `true` | Master on/off switch. `false` skips DB init, never registers the scheduler job, and `POST /adversarial/trigger` returns `{"status": "disabled"}` instead of running anyway — checked at both scheduler-registration time and inside `run_adversarial_test_cycle()` itself, so a direct call can never accidentally run real queries against the LLM/SearXNG/Kiwix backends while turned off |
+| `ADVERSARIAL_TEST_ENABLED` | `false` | Master on/off switch — opt-in (defaults off), since when on it generates extra background query traffic against the LLM/SearXNG/Kiwix backends. `false` skips DB init, never registers the scheduler job, and `POST /adversarial/trigger` returns `{"status": "disabled"}` instead of running anyway — checked at both scheduler-registration time and inside `run_adversarial_test_cycle()` itself, so a direct call can never accidentally run real queries against the LLM/SearXNG/Kiwix backends while turned off |
 | `ADVERSARIAL_TEST_INTERVAL_MINUTES` | `60` | How often the scheduler tick fires |
 | `ADVERSARIAL_TEST_BATCH_SIZE` | `8` | Queries generated per tick — cheap to raise (no LLM calls in the hot path) |
 | `ADVERSARIAL_TEST_LATENCY_OUTLIER_MULTIPLIER` | `1.5` | How many multiples of a recipe's own historical p95 counts as a real latency outlier |

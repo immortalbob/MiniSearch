@@ -12,17 +12,21 @@ async def search(
     query: str,
     source: str = "auto",
     fusion_sources: list[str] | None = None,
+    synthesize: bool = False,
+    answer_style: str = "brief",
 ) -> str:
     """Search across local and remote knowledge sources via Mnemolis. ..."""
 ```
 
-This mirrors `POST /search`'s own request shape almost exactly — `query`, `source`, `fusion_sources` mean the same thing in both places, and the same [Routing](Routing), [Query Decomposition](Query-Decomposition), and [Conditional Query Detection](Conditional-Query-Detection) logic runs underneath regardless of which interface the call came through.
+This mirrors `POST /search`'s own request shape almost exactly — `query`, `source`, `fusion_sources` mean the same thing in both places, and the same [Routing](Routing), [Query Decomposition](Query-Decomposition), and [Conditional Query Detection](Conditional-Query-Detection) logic runs underneath regardless of which interface the call came through. `synthesize` / `answer_style` are the optional [Answer Synthesis](Answer-Synthesis) arguments — when `synthesize=true`, the tool returns the grounded synthesized answer instead of the raw source text, falling back to the raw text on any skip or failure (`answer_style` is `voice`/`brief`/`detailed`/`digest`).
 
 **A real, deliberate tradeoff worth knowing about:** `source` is typed as a plain `str`, not an `Enum`/`Literal`, even though the values are genuinely constrained to a fixed set (`auto`, `kiwix`, `forecast`, `news`, `web`, `uptime`, `ha`, `fusion`). This isn't an oversight — FastMCP's `@mcp.tool()` decorator currently has no supported way to register a fully custom JSON Schema (an open, unresolved upstream SDK issue), so the schema is inferred entirely from type hints. Using `Enum`/`Literal` here would generate a `$ref`/`$defs`-based schema with a separate, real, open compatibility bug that gets at least one real MCP client to reject the tool outright. A plain string with the valid values documented in the docstring sidesteps that specific bug, at the honest cost of losing schema-level enforcement — an invalid `source` value is now only caught by Mnemolis's own routing logic, not at the protocol layer.
 
 ## A real difference worth knowing about
 
 MCP's `search` tool calls `route()`, the simpler, backward-compatible wrapper that returns just the result string — not `route_with_source()`, which is what the REST API's `/search` endpoint uses to also report `source_used` (including whether a [fallback](Routing#fallback--when-a-source-comes-back-empty) occurred). This means an MCP client gets the plain answer text, the same content a REST caller would get, but **never** learns which source actually answered, or whether a fallback happened along the way. If you need that metadata, you need the REST API — MCP's contract is intentionally just "ask a question, get an answer," with no provenance attached.
+
+(The one exception is `synthesize=true`: that path routes through `route_query()` — the same entry point the REST endpoint uses — so synthesis can run inside its stats context, and returns the grounded `answer` when one was produced, otherwise the raw result. The client still receives just a string; the provenance point above is unchanged.)
 
 **Expected failures come back as a successful response with descriptive text — genuine unexpected failures now surface as `isError=True`.** The MCP protocol’s own `CallToolResult` has a real `isError` boolean for this — and the underlying SDK uses it: an uncaught exception inside a tool function propagates to the SDK’s own dispatcher, which calls `_make_error_result()` and returns `CallToolResult(isError=True, ...)`.
 

@@ -1,6 +1,6 @@
 # Answer Synthesis
 
-*Added v3.55.0. Opt-in, off by default. Design Doc 4.*
+*Added v3.55.0. Defaults on (opt-out) as of v3.55.2 — see the master switch below. Design Doc 4 (a Fable Capability Extension).*
 
 Mnemolis retrieves; historically it never *answered*. Every response is source text — a truncated Kiwix article, a scored web-result list, a fused blob with `[SOURCE — DESCRIPTION]` headers — and the job of turning that into an answer was pushed onto whichever client asked. That works fine for Open WebUI and Claude Desktop, which have their own LLM in the loop. It works badly for the deployment that matters most: the **voice pipeline**. When a satellite asks *"what's happening with the space program lately,"* Home Assistant's TTS ends up reading fused headers and three headline excerpts out loud, while the strongest hardware in the stack (the Beast's RTX 4090 running qwen3:8b) sits one hop away doing nothing but routing.
 
@@ -12,7 +12,7 @@ Everything below follows from five constraints, in priority order. They're worth
 
 1. **Additive, never substitutive.** The `result` field always carries the raw retrieved text, byte-identical to before, whether or not synthesis ran. Synthesis only ever populates the new `answer` field (`null` otherwise). Any failure — timeout, empty reply, gate rejection, LLM unconfigured — yields `answer: null` plus a `synthesis_skipped`/`synthesis_rejected` [explanation event](Explanation-Chains), and the caller has exactly what they'd have had today. This is the semantic cache's "constraint #1" posture applied to a new pipeline stage.
 2. **Grounded or silent.** The model answers *only* from the material. When the material doesn't contain an answer, the correct output is the honest miss — `"The retrieved sources don't answer this."` — surfaced as a real `answer`, because "the sources don't say" *is* a grounded answer. Synthesis must never become the place hallucinations enter a system whose entire wiki is about not returning wrong things confidently.
-3. **Never on the path of clients that don't want it.** Per-request `synthesize` flag defaulting false, under a `SYNTHESIS_ENABLED` master switch (default false for one release — the standard rollout). No client that doesn't ask pays a single token of latency.
+3. **Never on the path of clients that don't want it.** Every call is gated by the per-request `synthesize` flag under a `SYNTHESIS_ENABLED` master switch. The switch shipped false for its first release (the standard rollout contract) and flipped to true — default on — in v3.55.2 once synthesis had soaked; because every call is still per-request gated, default-on costs nothing for clients that don't ask. No client that doesn't ask pays a single token of latency.
 4. **Attribution survives synthesis.** Multi-source answers must say which source claims what; single-source answers carry a one-line attribution tag.
 5. **Budgeted for voice.** The primary consumer speaks its output. Length is a first-class request parameter (`answer_style`), enforced by sentence-boundary truncation as a backstop.
 
@@ -31,6 +31,8 @@ Everything below follows from five constraints, in priority order. They're worth
 ```
 
 `answer_style` is one of `voice` (≈≤2 sentences, `SYNTHESIS_VOICE_MAX_CHARS`, for TTS), `brief` (one short paragraph, fixed 800 chars — the default), `detailed` (`SYNTHESIS_MAX_CHARS`), or `digest` (see below). Existing clients that never set `synthesize` see three new keys that are always `null`/`[]`/`false` — the same additive precedent [explanation chains](Explanation-Chains) set with its one always-null field.
+
+The fusing styles (`voice`, `brief`, `detailed`) are steered toward natural, connected prose rather than a rundown of the source material (v3.55.2). A universal prompt rule forbids narrating the material itself — no "one article discusses… another piece reflects… there is coverage of…" — and `detailed`/`brief` additionally ask the model to weave related points into one smooth summary. This is a prompt-level steer, deliberately not a gate (a gate on prose phrasing would reject good answers), so expect markedly more fluid output, not surgically perfect. The steer is kept out of `digest`, whose job is to enumerate.
 
 ### The `digest` style — preserve items, don't fuse them (v3.55.1)
 
@@ -97,6 +99,7 @@ Streaming token output; multi-turn answer refinement; synthesis of `explain` tra
 ## Related
 
 - [Configuration Reference — Answer synthesis](Configuration-Reference#answer-synthesis)
+- [The Answer Synthesis Voice Soak](The-Answer-Synthesis-Voice-Soak) — the development record of how a real voice deployment shaped the `digest` style and the prose-fluency rules after this shipped
 - [Explanation Chains](Explanation-Chains) — the trace substrate synthesis records into
 - [Fusion](Fusion) — where the `[SOURCE — DESCRIPTION]` headers synthesis parses come from
 - [The Cached Failure Bug Found Three Times](The-Cached-Failure-Bug-Found-Three-Times) — why the honest miss is never cached

@@ -4,7 +4,7 @@ Mnemolis is a self-hosted knowledge broker for homelabs. It sits between you and
 
 ## What it actually is
 
-A single Docker container exposing a REST API and an [MCP server](MCP-Server), both backed by the same underlying logic: [routing](Routing) decides which [source](Sources) applies, [decomposition](Query-Decomposition) splits compound questions into independent intents, [fusion](Fusion) merges answers from more than one source when a question genuinely needs it, and [conditional detection](Conditional-Query-Detection) handles "if X, Y" phrasing honestly rather than guessing.
+A single Docker container exposing a REST API and an [MCP server](MCP-Server), both backed by the same underlying logic: [routing](Routing) decides which [source](Sources) applies, [decomposition](Query-Decomposition) splits compound questions into independent intents, [fusion](Fusion) merges answers from more than one source when a question genuinely needs it, and [conditional detection](Conditional-Query-Detection) handles "if X, Y" phrasing honestly rather than guessing. When a client wants an answer rather than raw source text — a voice assistant especially — [answer synthesis](Answer-Synthesis) composes a short one *from the retrieved material only*, returned alongside the raw result.
 
 ## What it deliberately isn't
 

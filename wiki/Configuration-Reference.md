@@ -75,7 +75,7 @@ Opt-in, per-request LLM composition of a short, grounded answer *from the retrie
 
 | Variable | Default | Notes |
 |----------|---------|-------|
-| `SYNTHESIS_ENABLED` | `false` | Master switch, standard rollout contract (default false for one release). While false, a request's `synthesize=true` becomes a no-op that emits a `synthesis_skipped: disabled` [explanation](Explanation-Chains) event rather than silently running — no client that doesn't ask pays any latency either way |
+| `SYNTHESIS_ENABLED` | `true` | Master switch. Shipped `false` for its first release (v3.55.0, the standard rollout contract), flipped to `true` in v3.55.2 once soaked. While false, a request's `synthesize=true` becomes a no-op that emits a `synthesis_skipped: disabled` [explanation](Explanation-Chains) event rather than silently running. Every call is per-request gated either way, so no client that doesn't ask pays any latency |
 | `SYNTHESIS_TIMEOUT_SECONDS` | `20` | The synthesis generation's own timeout, deliberately independent of the routing call's hardcoded 10s — this is a real multi-sentence generation, not a one-token routing pick. On timeout, `answer` is `null` and the raw `result` is untouched |
 | `SYNTHESIS_MODEL` | *(empty)* | Blank = `LLM_MODEL`. Exists so routing can run a small, fast model while synthesis runs a larger instruct model on the same backend — the two calls have genuinely different quality/latency tradeoffs |
 | `SYNTHESIS_INPUT_BUDGET_CHARS` | `6000` | Total characters of retrieved material offered to the prompt, apportioned proportionally across attributed sections. qwen3:8b at 32K context has ample room; the budget keeps latency predictable and is configurable down for smaller-context models |
@@ -130,7 +130,7 @@ Opt-in, per-request LLM composition of a short, grounded answer *from the retrie
 
 | Variable | Default | Notes |
 |----------|---------|-------|
-| `ADVERSARIAL_TEST_ENABLED` | `true` | Master on/off switch for [adversarial self-testing](Adversarial-Self-Testing). `false` skips DB init, never registers the scheduler job, and makes `POST /adversarial/trigger` a safe no-op |
+| `ADVERSARIAL_TEST_ENABLED` | `false` | Master on/off switch for [adversarial self-testing](Adversarial-Self-Testing) — opt-in (defaults off), since it generates extra background traffic against the LLM/SearXNG/Kiwix backends. `false` skips DB init, never registers the scheduler job, and makes `POST /adversarial/trigger` a safe no-op |
 | `ADVERSARIAL_TEST_INTERVAL_MINUTES` | `60` | How often the scheduler tick fires |
 | `ADVERSARIAL_TEST_BATCH_SIZE` | `8` | Queries generated per tick — cheap to raise, since generation is pure combinatorics with no LLM calls in the hot path |
 | `ADVERSARIAL_TEST_LATENCY_OUTLIER_MULTIPLIER` | `1.5` | How many multiples of a recipe's own historical p95 latency counts as a real outlier |

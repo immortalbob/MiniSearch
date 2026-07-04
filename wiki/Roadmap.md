@@ -71,23 +71,16 @@ The v3.51.1 external function-by-function review and the two releases implementi
 - ✅ **v3.53.0 — [Semantic Routing Cache](Semantic-Routing-Cache)** — embedding-based reuse of routing decisions across rephrasings, targeting the last avoidable routing-path latency (the ~200–700ms cold LLM call for a query the exact-match cache has seen only in different words). Opt-in via `EMBEDDING_MODEL`; conservative similarity threshold; decisions always read from the live routing cache.
 - ✅ **v3.53.0 — [Explanation Chains](Explanation-Chains)** — `/search` `explain=true` returns the ordered trace of what routing actually did, built as more keys in the v3.52.0 stats channel rather than the signature-threading the original design doc assumed. First of the four original design documents to ship.
 
-## Known limitations (tracked, accepted, not blocking)
+## Fable Capability Extensions — in progress
 
-These are real, understood boundaries — not bugs waiting for a fix, but deliberate scope decisions or honest, accepted ceilings. A reader-facing version of this same list, written for evaluating fit rather than tracking status, lives at [Known Limitations](Known-Limitations):
+A set of design documents authored as a development roadmap to extend Mnemolis's existing capabilities rather than add unrelated features. They are built and tested one at a time.
 
-- **Single ambiguous bare words** (e.g. "galaxy") can land on a thematically-related but imprecise match when the index genuinely contains multiple comparably-relevant senses of the word. See [Kiwix Scoring](Kiwix-Scoring#where-scoring-still-has-a-real-ceiling).
-- **Conditional phrasing without an explicit comma** ("if the front door is unlocked tell me") is intentionally not detected — a real grammatical-parsing problem, not a pattern-matching one. See [Conditional Query Detection](Conditional-Query-Detection#why-the-pattern-is-this-narrow).
-- **A decomposed segment merging two unrelated topics** may route to a single source that doesn't serve both well — an accepted, minor side effect of the [proper-noun-pair guard's](The-Proper-Noun-Pair-Saga) content-preservation fix, not a regression.
-
-## Tabled, revisit in ~1 year
-
-These are still squarely in "permitted to fail, no obligation to succeed" territory — the same honest framing the now-shipped temporal pattern detection work used to carry above, before it actually landed.
-
-**Cross-modal grounding** — correlating a camera snapshot with a text answer ("did anything weird happen at the back door" pulling the actual image alongside the sensor log) would be a genuine "wow" capability, not just well-executed plumbing. Deliberately not pursued yet — the current camera setup (Ring) isn't infrastructure worth building on top of long-term; revisit once a self-controlled NVR solution exists instead.
-
-## Still tracked, lower priority
-
-- **New source modules** — see [Contributing](Contributing) for the current list of proposed ones looking for contributors
-- **HA/voice pipeline architecture question** — whether to bypass Home Assistant's own conversation/intent layer for non-device-control voice queries, piping STT output more directly to Mnemolis's `/search` instead, and keeping HA for device control and audio I/O only. Raised, never designed — a genuinely different kind of work (infrastructure/integration) than anything else on this list.
-- **`fusion.py`'s title-only item deduplication can treat genuinely different articles as duplicates.** `_dedupe_items_across_blobs()` keys purely on an item's leading `**Title**` line — confirmed this can mis-merge wire-service syndication or multiple outlets covering the same event with identical headline phrasing. A naive full-content key was checked and found to introduce its own regression (the same article reached via two different tracking-parameter URLs would wrongly count as separate items). The right fix — title plus normalized URL when present, falling back to title-only when not — is specified as a direction, not yet implemented. Found during the v3.50.18 `fusion.py` investigation; see [The Fusion Merge Bugs](The-Fusion-Merge-Bugs#title-only-item-deduplication-risk--documented-not-yet-fixed) for the full reasoning.
-✅ **The MCP `search` tool now correctly surfaces genuine unexpected failures as `isError=True`.** All expected, recoverable failures (source not configured, empty results, unknown source name) are returned as descriptive strings by `route()` itself — those still come back as successful responses. A genuine unexpected exception (a real bug) now propagates to the SDK’s own handler, which returns `CallToolResult(isError=True, ...)`, giving MCP clients a structured way to distinguish the two cases. Fixed by removing the broad `try/except` from `search()`. See [MCP Server](MCP-Server) for the updated contract.
+- ✅ **Answer Synthesis** — per-request `synthesize=true` grounded answer composition, with `voice`/`brief`/`detailed`/`digest` styles. See [Answer Synthesis](Answer-Synthesis). Shipped v3.55.0–v3.55.2.
+- ⬜ **History-Time-Series-Source**
+- ⬜ **Sentinel-Standing-Queries**
+- ⬜ **Conversational-Sessions**
+- ⬜ **Access-Partitioning-and-Memory**
+- ⬜ **Semantic-Relevance-Layer**
+- ⬜ **Vision-Source-Cross-Modal-Grounding**
+- ⬜ **Curator-Continuous-Evaluation**
+- ⬜ **Mnemoforge-Corpus-Foundry**

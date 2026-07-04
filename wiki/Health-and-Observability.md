@@ -66,6 +66,8 @@ This is tracked with a single boolean column (`fallback_occurred`) on the query 
 
 `/logs/stats` also reports `latency_by_source` (average latency per source) and `top_queries` (your 10 most-repeated queries, each with its hit count and average latency).
 
+When [Answer Synthesis](Answer-Synthesis) is in use, `/logs/stats` also reports a `synthesis` block — `{requested, served, not_in_sources, rejected_or_skipped}` — derived from a nullable `synthesized` status column on the query log (`NULL` = the request didn't ask for synthesis, `1` = a real grounded answer was served, `2` = the honest `NOT_IN_SOURCES` miss, `0` = requested but skipped or gate-rejected). It's the at-a-glance health of the feature over time: a `rejected_or_skipped` that climbs relative to `served` is the signal to look at *why* (the [explanation chain](Explanation-Chains)'s `synthesis_rejected`/`synthesis_skipped` events name the specific gate or reason). The column is added by a migration-safe guarded `ALTER TABLE`, so a log DB predating synthesis reports zeros rather than erroring.
+
 `latency_by_source` is an overall average — it includes both cold queries (a real backend call) and warm ones (a cache hit), not warm-only. That's deliberate: a warm-only number would look almost identical across every source regardless of how slow that source actually is when it has real work to do, since cache hits are fast no matter the source.
 
 Each entry in `top_queries` reports the source that answered it **most recently**, not whichever source happened to answer it most often historically. This matters if routing behavior for a query has changed over time — you'll see what it does *now*, not a stale answer from before a routing change.
