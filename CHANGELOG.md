@@ -4,6 +4,23 @@ All notable changes to Mnemolis are documented here, from v3.45.0 onward. For ev
 
 ---
 
+## [3.55.2]
+
+### Changed — synthesis prose reads naturally, not like a feed rundown
+
+Found on the voice soak: a `detailed` news summary narrated the *shape of the feed* — "One article discusses… Another piece reflects… There is also coverage of…" — instead of just telling you the news. The model does this because the material arrives as discrete sections and nothing told it to dissolve them. Two prompt steers fix it, both prompt-level (a gate on prose phrasing would reject good answers, so there deliberately isn't one):
+
+- A **universal rule** in every synthesis prompt: state the information directly, never describe the source material itself ("one article", "another piece", "the sources say", "there is coverage of") — report what happened, not that something reported it. This applies to every style, including `digest`, whose lines should state the item, not narrate it.
+- The **`detailed` and `brief` styles** now ask for flowing, connected prose that weaves related points into one smooth summary rather than addressing each item separately — the "connect, don't enumerate" half that distinguishes a fused summary from `digest`'s list. `digest` is untouched: its job is to preserve and enumerate, and the fluency steer is explicitly kept out of it.
+
+No config, gate, cache, or contract changes; the numeric/attribution/echo gates and the additive fallback are exactly as before. Prompts steer rather than guarantee — expect markedly more fluid prose, not surgically perfect.
+
+### Changed
+- **Defaults flipped now that both features have soaked:** `SYNTHESIS_ENABLED` now defaults **true** (opt-out) — synthesis is additive by contract and gated per-request, so default-on costs nothing for clients that don't ask; and `ADVERSARIAL_TEST_ENABLED` now defaults **false** (opt-in) — it's a diagnostic that generates extra background traffic against the LLM/SearXNG/Kiwix backends, so it stays off unless asked for.
+- Version bumped to 3.55.2. Test suite: 1518 passing (from 1514 at v3.55.1), ruff clean.
+
+---
+
 ## [3.55.1]
 
 ### Added — the `digest` answer style

@@ -46,25 +46,31 @@ services:
       EMBEDDING_MODEL: ""             # e.g. nomic-embed-text
       EMBEDDING_URL: ""               # blank = same as LLM_URL
       SEMANTIC_ROUTING_THRESHOLD: "0.92"  # cosine-similarity floor; tune only after auditing with explain=true
-      # Grounded answer synthesis (optional) — when a client sets
-      # synthesize=true on /search (or the MCP search tool), the local
-      # LLM composes a short, grounded answer FROM the retrieved material
-      # and returns it in a separate `answer` field, alongside the raw
-      # result (never instead of it). Built for the voice pipeline, whose
-      # TTS otherwise reads fused headers and article boilerplate aloud.
-      # Leave SYNTHESIS_ENABLED false to make the per-request flag a no-op.
+      SEMANTIC_WARMUP_ENABLED: "true"     # re-embed the persisted routing cache at startup so rephrasings match immediately after a restart
+      # Grounded answer synthesis — when a client sets synthesize=true on
+      # /search (or the MCP search tool), the local LLM composes a short,
+      # grounded answer FROM the retrieved material and returns it in a
+      # separate `answer` field, alongside the raw result (never instead of
+      # it). Built for the voice pipeline, whose TTS otherwise reads fused
+      # headers and article boilerplate aloud. Defaults on (opt-out): it's
+      # additive and gated per-request, so it costs nothing for clients
+      # that don't ask. Set false to make the per-request flag a no-op.
       # Recommended: LLM_KEEP_ALIVE=30m on a dedicated Beast-class backend
       # so voice synthesis never pays a model load.
       # See https://github.com/immortalbob/Mnemolis/wiki/Answer-Synthesis
-      SYNTHESIS_ENABLED: "false"          # master switch; per-request synthesize=true is a no-op while false
+      SYNTHESIS_ENABLED: "true"           # master switch; per-request synthesize=true is a no-op while false
       SYNTHESIS_TIMEOUT_SECONDS: "20"     # own budget — a real generation, not a routing pick
       SYNTHESIS_MODEL: ""                 # blank = LLM_MODEL; set to run a larger instruct model just for synthesis
-      SYNTHESIS_VOICE_MAX_CHARS: "400"    # answer_style=voice ceiling (≤2 sentences for TTS); brief is fixed 800
+      SYNTHESIS_MIN_INPUT_CHARS: "200"    # results shorter than this skip synthesis (a one-line HA state is already ideal)
+      SYNTHESIS_INPUT_BUDGET_CHARS: "6000"    # source material offered to the prompt, apportioned across sections
+      SYNTHESIS_MAX_CHARS: "2000"         # answer_style=detailed ceiling; brief is fixed 800
+      SYNTHESIS_VOICE_MAX_CHARS: "400"    # answer_style=voice ceiling (≤2 sentences for TTS)
       SYNTHESIS_DIGEST_MAX_CHARS: "3000"  # answer_style=digest output ceiling — preserves many items instead of fusing
       SYNTHESIS_DIGEST_INPUT_BUDGET_CHARS: "12000"  # digest-only input budget; how much wide material reaches the model
       FORECAST_LATITUDE: ""           # your latitude (e.g. 40.7128)
       FORECAST_LONGITUDE: ""          # your longitude (e.g. -74.0060)
       FORECAST_LOCATION_NAME: ""      # e.g. "New York, NY"
+      FORECAST_TIMEZONE: ""           # e.g. America/New_York — see https://en.wikipedia.org/wiki/List_of_tz_database_time_zones
       # Home Assistant
       HA_URL: ""
       HA_TOKEN: ""
@@ -72,7 +78,18 @@ services:
       UPTIME_KUMA_URL: ""              # e.g. http://minikuma.local:3001
       UPTIME_KUMA_USERNAME: ""         # your Uptime Kuma username
       UPTIME_KUMA_PASSWORD: ""         # your Uptime Kuma password
-      FORECAST_TIMEZONE: ""           # e.g. America/New_York — see https://en.wikipedia.org/wiki/List_of_tz_database_time_zones
+      # Background analytics (both optional)
+      # Temporal patterns: mines the query log for recurring time-of-day
+      # correlations. Adversarial testing: continuously probes routing with
+      # synthetic adversarial queries and flags anomalies — off by default
+      # because it generates extra background traffic against your
+      # LLM/SearXNG/Kiwix backends. Enable when you want the diagnostic.
+      TEMPORAL_PATTERN_DETECTION_ENABLED: "true"
+      ADVERSARIAL_TEST_ENABLED: "false"       # opt-in; POST /adversarial/trigger runs one cycle on demand regardless
+      ADVERSARIAL_TEST_INTERVAL_MINUTES: "60"
+      # Security — comma-separated API keys. Blank = no auth (open on your
+      # LAN). Set one or more keys to require them on every request.
+      API_KEYS: ""
     volumes:
       - mnemolis_data:/app/data
     networks:

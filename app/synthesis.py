@@ -94,10 +94,27 @@ def _style_instruction(style: str) -> str:
     if style == "voice":
         return (
             "Answer in at most two short sentences, phrased naturally for "
-            "reading aloud. No lists, headers, or markdown."
+            "reading aloud, the way you would say it to someone. No lists, "
+            "headers, or markdown."
         )
     if style == "detailed":
-        return "Answer in a few short paragraphs of plain prose."
+        # The fluency fix (v3.55.2): without the explicit "weave / smooth
+        # narrative" steer, the model narrates the material's *structure*
+        # ("one article discusses... another piece reflects...") because
+        # the material arrives as discrete sections and nothing tells it to
+        # dissolve them. This is a prose-STYLE steer, deliberately not a
+        # gate — a gate on phrasing would reject good answers, and prompts
+        # steer well enough here that the occasional slip isn't worth that
+        # cost. The base prompt's anti-meta rule carries most of the load;
+        # this adds the "connect, don't enumerate" half that separates a
+        # fused summary from digest's list.
+        return (
+            "Answer in a few short, flowing paragraphs of natural prose. "
+            "Weave related points together into one smooth summary rather "
+            "than addressing each item separately — it should read like "
+            "someone telling you what is going on, not a rundown of "
+            "separate entries."
+        )
     if style == "digest":
         # Enumerate-don't-fuse. Every other style asks the model to
         # *answer the question* by combining the material into one reply;
@@ -115,7 +132,7 @@ def _style_instruction(style: str) -> str:
             "characters — just one plain sentence per line."
         )
     # brief (default)
-    return "Answer in one short paragraph of plain prose."
+    return "Answer in one short, flowing paragraph of natural prose."
 
 
 def _style_cap(style: str) -> int:
@@ -192,6 +209,10 @@ def _build_prompt(query: str, sections: list[tuple[str, str]], style: str) -> st
         "Answer the question using ONLY the material below. Rules:\n"
         f"- If the material does not contain the answer, reply exactly: {_NOT_IN_SOURCES_SENTINEL}\n"
         "- Never add facts, numbers, names, or dates that are not in the material.\n"
+        "- State the information directly, the way a person would say it. Do not "
+        "describe the source material itself — never write 'one article', 'another "
+        "piece', 'the sources say', 'there is coverage of', or similar. Report what "
+        "happened, not that something reported it.\n"
         f"- {_style_instruction(style)}\n"
         "- End with the source tags you used, in parentheses, e.g. (web, news).\n\n"
         f"Question: {query}\n\n"

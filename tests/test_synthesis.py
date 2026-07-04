@@ -144,6 +144,42 @@ class TestPromptAssembly:
         assert "NOT_IN_SOURCES" in prompt
 
 
+class TestFluencyContract:
+    """The v3.55.2 fluency steer. These assert the PROMPT carries the
+    right instruction per style — not the model's actual output, which is
+    mocked here and, as a matter of design, prompt-steered rather than
+    gate-enforced (a gate on prose phrasing would reject good answers)."""
+
+    def test_base_prompt_forbids_narrating_the_source_material(self):
+        # The universal anti-meta rule — present for every style, so even
+        # digest lines state the item rather than "one article says...".
+        for style in ("voice", "brief", "detailed", "digest"):
+            prompt = synthesis._build_prompt("q", [("news", "material")], style)
+            assert "one article" in prompt  # named in the forbidden list
+            assert "not that something reported it" in prompt
+
+    def test_detailed_weaves_related_points(self):
+        # The "connect, don't enumerate" half that separates a fused
+        # summary from digest's list — this is the fix for the
+        # "one article... another piece..." choppiness.
+        instr = synthesis._style_instruction("detailed")
+        assert "weave" in instr.lower()
+        assert "rather than addressing each item separately" in instr.lower()
+
+    def test_brief_and_voice_ask_for_natural_prose(self):
+        assert "flowing" in synthesis._style_instruction("brief").lower()
+        assert "the way you would say it" in synthesis._style_instruction("voice").lower()
+
+    def test_digest_is_not_told_to_fuse_into_flowing_prose(self):
+        # The fluency steer must NOT leak into digest, whose whole job is
+        # to enumerate and preserve. Digest keeps "one per line" and does
+        # not gain the "weave into one smooth summary" instruction.
+        instr = synthesis._style_instruction("digest")
+        assert "one per line" in instr
+        assert "weave" not in instr.lower()
+        assert "smooth summary" not in instr.lower()
+
+
 # ---------------------------------------------------------------------------
 # Pre-flight skip matrix
 # ---------------------------------------------------------------------------

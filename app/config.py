@@ -293,11 +293,15 @@ class Settings(BaseSettings):
     # `answer` field, and any failure yields answer=null plus an
     # explanation event, never a degraded result.
     # -------------------------------------------------------------------
-    # Master switch, standard rollout contract: default false for one
-    # release, and while false the per-request `synthesize` flag becomes
-    # a no-op with a `synthesis_skipped: disabled` explanation event
-    # rather than silently running anyway.
-    synthesis_enabled: bool = False
+    # Master switch. Defaulted false for its first release (v3.55.0) per
+    # the standard rollout contract, then flipped true in v3.55.2 once
+    # synthesis had soaked on real hardware and voice: it's additive by
+    # contract (any failure yields answer=null and the raw result is
+    # untouched), and the per-request `synthesize` flag still gates every
+    # call, so a default-on switch costs nothing for clients that don't
+    # ask. Set false to make the per-request flag a no-op with a
+    # `synthesis_skipped: disabled` explanation event.
+    synthesis_enabled: bool = True
 
     # Timeout for the synthesis generation call — deliberately its own
     # budget, independent of the routing call's hardcoded 10s: this is a
@@ -516,13 +520,14 @@ class Settings(BaseSettings):
     # -------------------------------------------------------------------
     # Adversarial self-testing — background combinatorial query generation
     # -------------------------------------------------------------------
-    # Master on/off switch. Disabling skips DB init, never registers the
-    # scheduler job, and POST /adversarial/trigger returns a clear
-    # "disabled" response instead of silently running anyway — a real
-    # opt-out for anyone who'd rather not have any extra background
-    # traffic hitting their LLM/SearXNG/Kiwix backends, not a setting
-    # that only half-works.
-    adversarial_test_enabled: bool = True
+    # Master on/off switch. Defaults false — adversarial testing is an
+    # opt-in diagnostic that generates extra background traffic against
+    # the LLM/SearXNG/Kiwix backends, so it stays off unless explicitly
+    # enabled. Disabling skips DB init, never registers the scheduler
+    # job, and POST /adversarial/trigger returns a clear "disabled"
+    # response instead of silently running anyway — a real opt-out (now
+    # opt-in), not a setting that only half-works.
+    adversarial_test_enabled: bool = False
 
     # How often the adversarial test scheduler tick runs. 60 minutes is
     # frequent enough to accumulate real coverage over days/weeks while

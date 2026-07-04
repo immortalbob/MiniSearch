@@ -4,7 +4,7 @@
 [![Lint](https://github.com/immortalbob/Mnemolis/actions/workflows/lint.yml/badge.svg)](https://github.com/immortalbob/Mnemolis/actions/workflows/lint.yml)
 [![Docker Build](https://github.com/immortalbob/Mnemolis/actions/workflows/docker-build.yml/badge.svg)](https://github.com/immortalbob/Mnemolis/actions/workflows/docker-build.yml)
 
-A unified local knowledge search API for self-hosted homelabs. Mnemolis runs as a Docker container on your internal network and routes queries to the appropriate backend — offline knowledge, weather forecast, RSS news, live web search, service monitoring, or multiple sources concurrently — via a single endpoint.
+A unified local knowledge search API for self-hosted homelabs. Mnemolis runs as a Docker container on your internal network and routes queries to the appropriate backend — offline knowledge, weather forecast, RSS news, live web search, service monitoring, or multiple sources concurrently — via a single endpoint. When a client wants an answer rather than raw source text — voice assistants especially — it can also compose a short, grounded answer *from the retrieved material only*, returned alongside the raw result (see [Answer Synthesis](https://github.com/immortalbob/Mnemolis/wiki/Answer-Synthesis)).
 
 Exposes both a **REST API** and an **MCP server** so any client can connect to it.
 
@@ -58,7 +58,7 @@ Add this to your `claude_desktop_config.json`:
 
 Streamable HTTP endpoint: `http://your-host-ip:8888/mcp`
 
-The MCP server exposes a single `search` tool with the same interface as the REST API, including `fusion_sources` support.
+The MCP server exposes a single `search` tool with the same interface as the REST API, including `fusion_sources` support and the optional `synthesize` / `answer_style` arguments for a grounded synthesized answer.
 
 ## Requirements
 
@@ -155,7 +155,7 @@ All settings are passed as environment variables in `docker-compose.yml`:
 | `EMBEDDING_MODEL` | Embedding model for the [semantic routing cache](https://github.com/immortalbob/Mnemolis/wiki/Semantic-Routing-Cache) — reuses routing decisions across rephrasings of the same question, skipping the cold LLM routing call. Blank disables the feature entirely (zero behavior change). On Ollama: `ollama pull nomic-embed-text`, then set this to match | _(blank — disabled)_ |
 | `EMBEDDING_URL` | Backend serving the embedding model. Blank = same as `LLM_URL` | _(blank — uses `LLM_URL`)_ |
 | `SEMANTIC_ROUTING_THRESHOLD` | Cosine-similarity floor for reusing another query's routing decision. Deliberately conservative — a wrong reuse silently misroutes | `0.92` |
-| `SYNTHESIS_ENABLED` | Master switch for [grounded answer synthesis](https://github.com/immortalbob/Mnemolis/wiki/Answer-Synthesis) — opt-in, per-request LLM composition of a short answer *from the retrieved material only*, returned in a separate `answer` field alongside the raw `result`. Additive: off (or a request that doesn't ask) leaves the response byte-identical. While false, `synthesize=true` is a no-op | `false` |
+| `SYNTHESIS_ENABLED` | Master switch for [grounded answer synthesis](https://github.com/immortalbob/Mnemolis/wiki/Answer-Synthesis) — per-request LLM composition of a short answer *from the retrieved material only*, returned in a separate `answer` field alongside the raw `result`. Additive: off (or a request that doesn't ask) leaves the response byte-identical. Defaults on (opt-out); every call is still gated by the per-request `synthesize` flag | `true` |
 | `SYNTHESIS_TIMEOUT_SECONDS` | Synthesis generation timeout — its own budget, independent of the routing call's. On timeout, `answer` is null and `result` is untouched | `20` |
 | `SYNTHESIS_MODEL` | Blank = `LLM_MODEL`. Set to run a larger instruct model for synthesis while routing uses a smaller, faster one on the same backend | _(blank — uses `LLM_MODEL`)_ |
 | `SYNTHESIS_INPUT_BUDGET_CHARS` | Retrieved-material characters offered to the synthesis prompt, apportioned across sections | `6000` |
@@ -180,7 +180,7 @@ All settings are passed as environment variables in `docker-compose.yml`:
 | `WEB_NEWS_SCORE_THRESHOLD` | Web/news results scoring at or below this are dropped as irrelevant | `0` |
 | `WEB_NEWS_TOP_N` | Maximum web/news results kept after scoring | `10` |
 | `LOG_LEVEL` | Application log level (`DEBUG`, `INFO`, `WARNING`, `ERROR`) — `INFO` shows decomposition splits, disambiguation candidates, and article selection decisions | `INFO` |
-| `ADVERSARIAL_TEST_ENABLED` | Master on/off switch for [Adversarial Self-Testing](https://github.com/immortalbob/Mnemolis/wiki/Adversarial-Self-Testing). `false` skips DB init, never registers the scheduler job, and makes `POST /adversarial/trigger` a safe no-op | `true` |
+| `ADVERSARIAL_TEST_ENABLED` | Master on/off switch for [Adversarial Self-Testing](https://github.com/immortalbob/Mnemolis/wiki/Adversarial-Self-Testing) — opt-in (defaults off); generates extra background LLM/SearXNG/Kiwix traffic when on. `false` skips DB init, never registers the scheduler job, and makes `POST /adversarial/trigger` a safe no-op | `false` |
 | `ADVERSARIAL_TEST_INTERVAL_MINUTES` | How often the adversarial-testing scheduler tick fires | `60` |
 | `ADVERSARIAL_TEST_BATCH_SIZE` | Queries generated per tick — cheap to raise, since generation is pure combinatorics with no LLM calls in the hot path | `8` |
 | `ADVERSARIAL_TEST_LATENCY_OUTLIER_MULTIPLIER` | How many multiples of a recipe's own historical p95 latency counts as a real outlier | `1.5` |
@@ -372,6 +372,10 @@ ESP32 Voice Assistant
    └─ Decomposition  ────►└─ Snapshot Engine (changes)
           │
           ▼
+   Answer Synthesis   ← optional: LLM composes a short, grounded
+   (answer_style=voice)   spoken answer from the retrieved material,
+          │               so TTS reads an answer, not fused headers
+          ▼
       Response
           │
           ▼
@@ -380,6 +384,8 @@ ESP32 Voice Assistant
           ▼
       ESP32
 ```
+
+For voice specifically, `Mnemolis Intents` requests `synthesize=true` with `answer_style="voice"` and speaks the grounded `answer` when present, falling back to the raw `result` otherwise — so a synthesis skip or failure reads exactly what it read before synthesis existed. See the [Answer Synthesis](https://github.com/immortalbob/Mnemolis/wiki/Answer-Synthesis) wiki page.
 
 ### Multi-Client Architecture
 
@@ -683,6 +689,17 @@ With an explanation chain — the ordered trace of what routing actually did (in
 }
 ```
 
+With a grounded synthesized answer — the local LLM composes a short answer *from the retrieved material only*, returned in a separate `answer` field alongside the raw `result` (never instead of it). `answer_style` is one of `voice` (≤2 sentences, for TTS), `brief` (default), `detailed`, or `digest` (preserves many items for "summarize/list" requests). Requires `SYNTHESIS_ENABLED` (on by default). See the [Answer Synthesis](https://github.com/immortalbob/Mnemolis/wiki/Answer-Synthesis) wiki page:
+
+```json
+{
+  "query": "what is happening with the space program lately",
+  "source": "auto",
+  "synthesize": true,
+  "answer_style": "voice"
+}
+```
+
 Response:
 
 ```json
@@ -693,11 +710,14 @@ Response:
   "success": true,
   "cached": false,
   "error": null,
-  "explanation": null
+  "explanation": null,
+  "answer": null,
+  "answer_sources": [],
+  "synthesized": false
 }
 ```
 
-(`explanation` carries the event list only when the request set `"explain": true`; otherwise it's `null`.)
+(`explanation` carries the event list only when the request set `"explain": true`; otherwise it's `null`. `answer` carries the synthesized answer only when the request set `"synthesize": true` and synthesis produced one — otherwise it's `null`, `answer_sources` is `[]`, and `synthesized` is `false`; the raw `result` is always present regardless.)
 
 ### `GET /sources`
 Returns the list of available sources.

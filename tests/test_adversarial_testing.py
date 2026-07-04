@@ -560,6 +560,7 @@ class TestFullCycle:
     def test_cycle_persists_results_for_every_batch_item(self, tmp_path):
         temp_db = str(tmp_path / "test_adversarial.db")
         with patch("app.adversarial_testing.ADVERSARIAL_DB", temp_db), \
+             patch("app.adversarial_testing.settings.adversarial_test_enabled", True), \
              patch("app.adversarial_testing.settings.adversarial_test_batch_size", 5), \
              patch("app.router.route_with_source", return_value=("[KIWIX — X] content", "kiwix")):
             init_adversarial_db()
@@ -582,6 +583,7 @@ class TestFullCycle:
             return ("[KIWIX — X] content", "kiwix")
 
         with patch("app.adversarial_testing.ADVERSARIAL_DB", temp_db), \
+             patch("app.adversarial_testing.settings.adversarial_test_enabled", True), \
              patch("app.adversarial_testing.settings.adversarial_test_batch_size", 6), \
              patch("app.router.route_with_source", side_effect=flaky_route):
             init_adversarial_db()
@@ -801,6 +803,7 @@ class TestFlaggedResultExcerpt:
     def test_flagged_result_is_stored_as_an_excerpt(self, tmp_path):
         temp_db = str(tmp_path / "test_adversarial.db")
         with patch("app.adversarial_testing.ADVERSARIAL_DB", temp_db), \
+             patch("app.adversarial_testing.settings.adversarial_test_enabled", True), \
              patch("app.adversarial_testing.settings.adversarial_test_batch_size", 1), \
              patch("app.router.route_with_source", return_value=("No results found.", "web")):
             init_adversarial_db()
@@ -825,6 +828,7 @@ class TestFlaggedResultExcerpt:
         from app.adversarial_testing import RECIPES
         temp_db = str(tmp_path / "test_adversarial.db")
         with patch("app.adversarial_testing.ADVERSARIAL_DB", temp_db), \
+             patch("app.adversarial_testing.settings.adversarial_test_enabled", True), \
              patch("app.adversarial_testing.RECIPES", {"no_intent_fallthrough": RECIPES["no_intent_fallthrough"]}), \
              patch("app.adversarial_testing.settings.adversarial_test_batch_size", 1), \
              patch("app.router.route_with_source", return_value=("[KIWIX — X] real, legitimate content here.", "kiwix")):
@@ -841,6 +845,7 @@ class TestFlaggedResultExcerpt:
         long_result = "Error: " + ("x" * 1000)
         temp_db = str(tmp_path / "test_adversarial.db")
         with patch("app.adversarial_testing.ADVERSARIAL_DB", temp_db), \
+             patch("app.adversarial_testing.settings.adversarial_test_enabled", True), \
              patch("app.adversarial_testing.settings.adversarial_test_batch_size", 1), \
              patch("app.router.route_with_source", return_value=(long_result, "web")):
             init_adversarial_db()
@@ -856,6 +861,7 @@ class TestFlaggedResultExcerpt:
     def test_excerpt_is_exposed_via_get_flagged_combinations(self, tmp_path):
         temp_db = str(tmp_path / "test_adversarial.db")
         with patch("app.adversarial_testing.ADVERSARIAL_DB", temp_db), \
+             patch("app.adversarial_testing.settings.adversarial_test_enabled", True), \
              patch("app.adversarial_testing.settings.adversarial_test_batch_size", 1), \
              patch("app.router.route_with_source", return_value=("No results found.", "web")):
             init_adversarial_db()
@@ -949,7 +955,8 @@ class TestHealthSummaryAndFlaggedEndpointData:
 
     def test_summary_never_ran_state(self, tmp_path):
         temp_db = str(tmp_path / "test_adversarial.db")
-        with patch("app.adversarial_testing.ADVERSARIAL_DB", temp_db):
+        with patch("app.adversarial_testing.ADVERSARIAL_DB", temp_db), \
+             patch("app.adversarial_testing.settings.adversarial_test_enabled", True):
             init_adversarial_db()
             summary = get_adversarial_test_summary()
             assert summary["status"] == "never_ran"
@@ -958,7 +965,8 @@ class TestHealthSummaryAndFlaggedEndpointData:
 
     def test_summary_counts_match_real_rows(self, tmp_path):
         temp_db = str(tmp_path / "test_adversarial.db")
-        with patch("app.adversarial_testing.ADVERSARIAL_DB", temp_db):
+        with patch("app.adversarial_testing.ADVERSARIAL_DB", temp_db), \
+             patch("app.adversarial_testing.settings.adversarial_test_enabled", True):
             init_adversarial_db()
             import json
             _record_result(json.dumps(["a"]), "no_intent_fallthrough", "q1", "kiwix", 100, None)
@@ -1181,7 +1189,8 @@ class TestHealthSummaryAndFlaggedEndpointData:
         get_flagged_combinations()'s default view — these two numbers
         must never silently disagree."""
         temp_db = str(tmp_path / "test_adversarial.db")
-        with patch("app.adversarial_testing.ADVERSARIAL_DB", temp_db):
+        with patch("app.adversarial_testing.ADVERSARIAL_DB", temp_db), \
+             patch("app.adversarial_testing.settings.adversarial_test_enabled", True):
             init_adversarial_db()
             import json
             # One combination flagged then cleaned (still counts).
