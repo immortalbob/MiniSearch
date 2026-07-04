@@ -69,6 +69,20 @@ Every setting is an environment variable, set in `docker-compose.yml`. This page
 | `SEMANTIC_CACHE_MAX_SIZE` | `500` | Max stored query embeddings before oldest-eviction — the same bounded-eviction pattern both other caches use. Entries whose underlying routing decision has expired are skipped at match time and pruned, so the store can never serve a decision the routing cache no longer stands behind |
 | `SEMANTIC_WARMUP_ENABLED` | `true` | Re-embed the routing cache's persisted queries in a background thread at startup (v3.54.0), so rephrasings match immediately after a restart instead of only after each query is re-decided once. Never blocks startup; a failed batch falls back to normal lazy population. Only relevant when `EMBEDDING_MODEL` is set — turn off if your embedding backend boots slowly after a host restart and the warmup's failure warnings would be noise |
 
+## Answer synthesis
+
+Opt-in, per-request LLM composition of a short, grounded answer *from the retrieved material only*, returned in a separate `answer` field alongside the raw `result` — never instead of it. See [Answer Synthesis](Answer-Synthesis) (v3.55.0). Additive by contract: with the feature off or a request that doesn't ask for it, the response is byte-identical to before and the `answer`/`answer_sources`/`synthesized` fields are `null`/`[]`/`false`.
+
+| Variable | Default | Notes |
+|----------|---------|-------|
+| `SYNTHESIS_ENABLED` | `false` | Master switch, standard rollout contract (default false for one release). While false, a request's `synthesize=true` becomes a no-op that emits a `synthesis_skipped: disabled` [explanation](Explanation-Chains) event rather than silently running — no client that doesn't ask pays any latency either way |
+| `SYNTHESIS_TIMEOUT_SECONDS` | `20` | The synthesis generation's own timeout, deliberately independent of the routing call's hardcoded 10s — this is a real multi-sentence generation, not a one-token routing pick. On timeout, `answer` is `null` and the raw `result` is untouched |
+| `SYNTHESIS_MODEL` | *(empty)* | Blank = `LLM_MODEL`. Exists so routing can run a small, fast model while synthesis runs a larger instruct model on the same backend — the two calls have genuinely different quality/latency tradeoffs |
+| `SYNTHESIS_INPUT_BUDGET_CHARS` | `6000` | Total characters of retrieved material offered to the prompt, apportioned proportionally across attributed sections. qwen3:8b at 32K context has ample room; the budget keeps latency predictable and is configurable down for smaller-context models |
+| `SYNTHESIS_MIN_INPUT_CHARS` | `200` | Results shorter than this skip synthesis entirely — a one-line HA state answer like "Front Door: locked" is already the ideal voice answer, and rewriting it can only add risk. This rule alone exempts most `ha`/`uptime` traffic |
+| `SYNTHESIS_MAX_CHARS` | `2000` | `answer_style=detailed` ceiling. Over-budget replies are truncated at the last sentence boundary under the cap, never mid-sentence |
+| `SYNTHESIS_VOICE_MAX_CHARS` | `400` | `answer_style=voice` ceiling (≈≤2 sentences, for TTS). `brief` (the default style) is fixed at 800 — an internal middle point, not a deployment preference |
+
 ## Caching
 
 | Variable | Default | Notes |
