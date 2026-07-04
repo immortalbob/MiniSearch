@@ -4,6 +4,21 @@ All notable changes to Mnemolis are documented here, from v3.45.0 onward. For ev
 
 ---
 
+## [3.55.1]
+
+### Added — the `digest` answer style
+
+Found on the first real voice soak: asking a satellite to *"summarize the news"* with `answer_style=voice` returned a single story. That was synthesis working exactly as told — voice caps the answer at ~2 sentences, and the model faithfully compressed ten headlines into two, leading with the top item and gesturing at the rest. Nothing hallucinated; the length budget just destroyed nine-tenths of the point. The three existing styles (`voice`/`brief`/`detailed`) all ask the model to *answer the question* by fusing the material into one reply — right for a fact question, wrong for a breadth request.
+
+New `answer_style="digest"` inverts the framing for "summarize / list / read me everything" queries: it instructs the model to **list each distinct item or key point as its own short line, preserving specific names, numbers, and dates, without merging or dropping items.** It carries two larger budgets than the other styles because preservation is the whole job — `SYNTHESIS_DIGEST_MAX_CHARS` (3000) on output so many items survive, and `SYNTHESIS_DIGEST_INPUT_BUDGET_CHARS` (12000) on input so a wide result (ten headlines, a broad fusion) reaches the model before per-section apportioning trims it. Exposed on `/search`, the MCP `search` tool, and (v1.4.1+) the `mnemolis_intents` HA tool so the conversation agent can pick `digest` for list-shaped questions while keeping `voice` for everything else.
+
+The synthesis gates are unchanged and, for digest, the numeric-grounding gate is *more* load-bearing, not less: a dense multi-item digest carries many figures, and every one must still appear verbatim in the source or the answer is rejected and falls back to the raw result — the fidelity check that stops a "summary" from inventing a number. Attribution stays whole-answer, not per-item (the same precision-theater non-goal that rules out per-sentence citations).
+
+### Changed
+- Version bumped to 3.55.1. Test suite: 1514 passing (from 1508 at v3.55.0), ruff clean. New config: `SYNTHESIS_DIGEST_MAX_CHARS`, `SYNTHESIS_DIGEST_INPUT_BUDGET_CHARS`. Wiki [`Answer-Synthesis.md`](../../wiki/Answer-Synthesis) and Configuration Reference updated.
+
+---
+
 ## [3.55.0]
 
 ### Added — Grounded Answer Synthesis (opt-in, off by default)

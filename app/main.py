@@ -371,7 +371,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Mnemolis",
     description="Unified local knowledge search API with multi-source fusion. Routes queries to Kiwix, Open-Meteo, FreshRSS, SearXNG, Uptime Kuma, or multiple sources concurrently.",
-    version="3.55.0",
+    version="3.55.1",
     lifespan=lifespan,
 )
 
@@ -396,9 +396,11 @@ class SearchRequest(BaseModel):
     # `answer` field ALONGSIDE the raw `result`, never instead of it. Off
     # by default and additive: without it the answer/answer_sources/
     # synthesized fields are null/false and the response is byte-identical
-    # to today's. answer_style controls length: "voice" (≤2 sentences,
-    # for TTS), "brief" (one short paragraph, default), "detailed". See
-    # wiki/Answer-Synthesis.md.
+    # to today's. answer_style controls length and shape: "voice" (≤2
+    # sentences, for TTS), "brief" (one short paragraph, default),
+    # "detailed" (a few paragraphs), or "digest" (many distinct items
+    # preserved rather than fused — for "summarize/list/read me
+    # everything" queries). See wiki/Answer-Synthesis.md.
     synthesize: bool = False
     answer_style: str = "brief"
 

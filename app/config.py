@@ -333,6 +333,17 @@ class Settings(BaseSettings):
     synthesis_max_chars: int = 2000
     synthesis_voice_max_chars: int = 400
 
+    # "digest" answer style (v3.55.1) — for "summarize / list / read me
+    # everything" queries where the value is breadth, not a single fused
+    # answer. It gets its own, larger output cap so many distinct items
+    # survive rather than being compressed into two sentences, and its own
+    # larger INPUT budget (below) so a big multi-item result — ten news
+    # headlines, a wide fusion — actually reaches the model before
+    # per-section apportioning truncates it. Both default well above the
+    # other styles precisely because preservation is the point.
+    synthesis_digest_max_chars: int = 3000
+    synthesis_digest_input_budget_chars: int = 12000
+
     # -------------------------------------------------------------------
     # Fusion — concurrency, payload size, and timeout limits
     # -------------------------------------------------------------------

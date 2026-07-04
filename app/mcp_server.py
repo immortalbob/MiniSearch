@@ -117,9 +117,13 @@ async def search(
             source text. If synthesis is skipped, fails, or is disabled,
             the raw retrieved result is returned unchanged — this
             argument can only ever improve the reply, never degrade it.
-        answer_style: Length of the synthesized answer when synthesize is
+        answer_style: Shape of the synthesized answer when synthesize is
             true. One of: 'voice' (≤2 sentences, for text-to-speech),
-            'brief' (one short paragraph, default), 'detailed'.
+            'brief' (one short paragraph, default), 'detailed' (a few
+            paragraphs), or 'digest' (preserves many distinct items rather
+            than fusing them — use for "summarize", "list", or "read me
+            all the ..." requests where breadth matters more than a single
+            answer).
     """
     _LOGGER.info("MCP search: query=%r source=%r synthesize=%r", query[:80], source, synthesize)
 

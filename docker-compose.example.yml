@@ -60,6 +60,8 @@ services:
       SYNTHESIS_TIMEOUT_SECONDS: "20"     # own budget — a real generation, not a routing pick
       SYNTHESIS_MODEL: ""                 # blank = LLM_MODEL; set to run a larger instruct model just for synthesis
       SYNTHESIS_VOICE_MAX_CHARS: "400"    # answer_style=voice ceiling (≤2 sentences for TTS); brief is fixed 800
+      SYNTHESIS_DIGEST_MAX_CHARS: "3000"  # answer_style=digest output ceiling — preserves many items instead of fusing
+      SYNTHESIS_DIGEST_INPUT_BUDGET_CHARS: "12000"  # digest-only input budget; how much wide material reaches the model
       FORECAST_LATITUDE: ""           # your latitude (e.g. 40.7128)
       FORECAST_LONGITUDE: ""          # your longitude (e.g. -74.0060)
       FORECAST_LOCATION_NAME: ""      # e.g. "New York, NY"

@@ -98,6 +98,22 @@ def _style_instruction(style: str) -> str:
         )
     if style == "detailed":
         return "Answer in a few short paragraphs of plain prose."
+    if style == "digest":
+        # Enumerate-don't-fuse. Every other style asks the model to
+        # *answer the question* by combining the material into one reply;
+        # digest deliberately inverts that for "summarize/list/read me
+        # everything" queries, where the value is breadth and combining
+        # ten items into two sentences destroys nine of them. The
+        # instruction leans hard on preservation because the base prompt's
+        # "answer the question" framing otherwise pulls toward fusion.
+        return (
+            "List each distinct item or key point from the material as its "
+            "own short sentence, one per line. Preserve specific names, "
+            "numbers, and dates exactly as they appear in the material. Do "
+            "not merge separate items into a single generalization, and do "
+            "not drop items to save space. No markdown, headers, or bullet "
+            "characters — just one plain sentence per line."
+        )
     # brief (default)
     return "Answer in one short paragraph of plain prose."
 
@@ -107,7 +123,21 @@ def _style_cap(style: str) -> int:
         return settings.synthesis_voice_max_chars
     if style == "detailed":
         return settings.synthesis_max_chars
+    if style == "digest":
+        return settings.synthesis_digest_max_chars
     return _BRIEF_MAX_CHARS
+
+
+def _input_budget(style: str) -> int:
+    """Digest gets a larger input budget than the other styles: its whole
+    purpose is preserving many data points, so it must be *allowed to see*
+    more source material before the per-section apportioning truncates.
+    Every other style answers a question and a tighter budget only trims
+    redundancy; digest's budget is the ceiling on how many items can
+    survive at all."""
+    if style == "digest":
+        return settings.synthesis_digest_input_budget_chars
+    return settings.synthesis_input_budget_chars
 
 
 def _parse_sections(result: str, source_used: str) -> list[tuple[str, str]]:
@@ -281,7 +311,7 @@ def synthesize(query: str, result: str, source_used: str, style: str = "brief") 
     # query_expansion.py uses for its router accessors.
     from app.router import _get_cached, _set_cached, _looks_empty, _route_event
 
-    if style not in ("voice", "brief", "detailed"):
+    if style not in ("voice", "brief", "detailed", "digest"):
         style = "brief"
 
     # --- feature-level gates (can't synthesize at all) --------------------
@@ -325,7 +355,7 @@ def synthesize(query: str, result: str, source_used: str, style: str = "brief") 
 
     # --- prompt assembly --------------------------------------------------
     sections = _apportion_budget(
-        _parse_sections(result, source_used), settings.synthesis_input_budget_chars
+        _parse_sections(result, source_used), _input_budget(style)
     )
     offered_tags = [tag for tag, _ in sections]
     multi_section = len({tag for tag in offered_tags}) > 1

@@ -161,6 +161,7 @@ All settings are passed as environment variables in `docker-compose.yml`:
 | `SYNTHESIS_INPUT_BUDGET_CHARS` | Retrieved-material characters offered to the synthesis prompt, apportioned across sections | `6000` |
 | `SYNTHESIS_MIN_INPUT_CHARS` | Results shorter than this skip synthesis (a one-line HA state answer is already ideal for voice) — exempts most `ha`/`uptime` traffic | `200` |
 | `SYNTHESIS_MAX_CHARS` / `SYNTHESIS_VOICE_MAX_CHARS` | `answer_style` length ceilings: `detailed` / `voice`. `brief` (default style) is fixed at 800 | `2000` / `400` |
+| `SYNTHESIS_DIGEST_MAX_CHARS` / `SYNTHESIS_DIGEST_INPUT_BUDGET_CHARS` | `answer_style=digest` output and input budgets (v3.55.1) — larger than the other styles because digest preserves many distinct items ("summarize/list" queries) instead of fusing them | `3000` / `12000` |
 | `MORNING_START_HOUR` | Reference hour (0-23, local time) for resolving "this morning" in changes queries | `6` |
 | `WORK_START_HOUR` | Reference hour (0-23, local time) for resolving "while at work" in changes queries | `9` |
 | `API_KEYS` | Comma-separated list of valid API keys. Protects `POST /search` and `GET /changes`. | _(blank — auth disabled)_ |

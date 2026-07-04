@@ -53,6 +53,8 @@ class _SynthHarness:
             "voice_cap": settings.synthesis_voice_max_chars,
             "max_cap": settings.synthesis_max_chars,
             "syn_model": settings.synthesis_model,
+            "digest_cap": settings.synthesis_digest_max_chars,
+            "digest_budget": settings.synthesis_digest_input_budget_chars,
         }
         settings.synthesis_enabled = True
         settings.llm_url = "http://test-llm"
@@ -73,6 +75,8 @@ class _SynthHarness:
         settings.synthesis_voice_max_chars = self._orig["voice_cap"]
         settings.synthesis_max_chars = self._orig["max_cap"]
         settings.synthesis_model = self._orig["syn_model"]
+        settings.synthesis_digest_max_chars = self._orig["digest_cap"]
+        settings.synthesis_digest_input_budget_chars = self._orig["digest_budget"]
 
 
 # ---------------------------------------------------------------------------
@@ -451,3 +455,88 @@ class TestEchoNormalization:
     def test_punctuation_and_case_insensitive_equality(self):
         assert synthesis._normalize_echo("What is the CAPITAL of France?") == \
             synthesis._normalize_echo("what is the capital of france")
+
+
+class TestDigestStyle(_SynthHarness):
+    """The "digest" answer style (v3.55.1) — preserves many distinct items
+    instead of fusing them, with its own larger output cap and input
+    budget, for "summarize / list / read me everything" queries."""
+
+    def test_digest_instruction_enumerates_and_preserves(self):
+        instr = synthesis._style_instruction("digest")
+        assert "one per line" in instr
+        assert "not merge" in instr.lower() or "do not merge" in instr.lower()
+        assert "not drop items" in instr.lower()
+
+    def test_digest_cap_uses_its_own_setting(self):
+        settings.synthesis_digest_max_chars = 3333
+        assert synthesis._style_cap("digest") == 3333
+
+    def test_digest_input_budget_is_larger_and_style_scoped(self):
+        settings.synthesis_input_budget_chars = 6000
+        settings.synthesis_digest_input_budget_chars = 12000
+        assert synthesis._input_budget("digest") == 12000
+        # Every other style keeps the normal budget.
+        assert synthesis._input_budget("voice") == 6000
+        assert synthesis._input_budget("brief") == 6000
+
+    def test_digest_is_a_valid_style_not_coerced_to_brief(self):
+        # A digest request must survive style validation; if it were
+        # coerced to "brief" it would use the brief cap.
+        settings.synthesis_digest_max_chars = 3000
+        result = "Story one happened. Story two happened. Story three happened. " * 12
+        items = [
+            "A council meeting was held downtown.",
+            "A road reopened after repairs.",
+            "The library extended its hours.",
+            "A local team advanced to finals.",
+            "The weather turned cooler overnight.",
+            "A new cafe opened on Main Street.",
+            "The park hosted a summer festival.",
+            "A power outage was resolved quickly.",
+            "The museum unveiled a new exhibit.",
+            "A charity drive met its goal.",
+        ]
+        long_reply = "\n".join(items) + " (news)"
+        with patch("app.llm.generate", return_value=long_reply):
+            with _route_stats_context() as stats:
+                out = synthesis.synthesize("summarize the news", result, "news", "digest")
+        assert out.synthesized is True
+        inv = [e for e in stats["events"] if e["step"] == "synthesis_invoked"][0]
+        assert inv["style"] == "digest"
+        # 10 short items comfortably exceed the 800-char brief cap; their
+        # survival proves the digest cap (3000) was applied, not brief's.
+        assert out.answer.count("\n") >= 5
+
+    def test_digest_preserves_multiple_items_a_voice_cap_would_flatten(self):
+        settings.synthesis_voice_max_chars = 120
+        settings.synthesis_digest_max_chars = 3000
+        result = "Ten distinct headlines worth of real material. " * 20
+        items = [
+            "Headline about the council vote.",
+            "Headline about a road closure.",
+            "Headline about the school board.",
+            "Headline about the weather shift.",
+            "Headline about a new business.",
+            "Headline about a sports result.",
+            "Headline about a festival.",
+            "Headline about a power outage.",
+        ]
+        reply = "\n".join(items) + " (news)"
+        with patch("app.llm.generate", return_value=reply):
+            with _route_stats_context():
+                out = synthesis.synthesize("summarize the news", result, "news", "digest")
+        # The same reply under voice's 120-char cap would be truncated to
+        # one or two items; digest keeps them all.
+        assert out.answer.count("Headline") >= 6
+
+    def test_digest_still_runs_numeric_gate(self):
+        # Digest carries many facts, so the numeric gate is more
+        # load-bearing, not disabled: an invented number still rejects.
+        result = "The council met and discussed several routine local matters. " * 10
+        reply = "The budget was 999 dollars.\nA road reopened. (news)"
+        with patch("app.llm.generate", return_value=reply):
+            with _route_stats_context() as stats:
+                out = synthesis.synthesize("summarize the news", result, "news", "digest")
+        assert out.answer is None
+        assert "numeric" in _event_reasons(stats, "synthesis_rejected")
