@@ -30,7 +30,23 @@ Everything below follows from five constraints, in priority order. They're worth
 }
 ```
 
-`answer_style` is one of `voice` (≈≤2 sentences, `SYNTHESIS_VOICE_MAX_CHARS`, for TTS), `brief` (one short paragraph, fixed 800 chars — the default), or `detailed` (`SYNTHESIS_MAX_CHARS`). Existing clients that never set `synthesize` see three new keys that are always `null`/`[]`/`false` — the same additive precedent [explanation chains](Explanation-Chains) set with its one always-null field.
+`answer_style` is one of `voice` (≈≤2 sentences, `SYNTHESIS_VOICE_MAX_CHARS`, for TTS), `brief` (one short paragraph, fixed 800 chars — the default), `detailed` (`SYNTHESIS_MAX_CHARS`), or `digest` (see below). Existing clients that never set `synthesize` see three new keys that are always `null`/`[]`/`false` — the same additive precedent [explanation chains](Explanation-Chains) set with its one always-null field.
+
+### The `digest` style — preserve items, don't fuse them (v3.55.1)
+
+`voice`, `brief`, and `detailed` all ask the model to *answer the question* by combining the retrieved material into a single reply. That's exactly right for a fact question ("what's happening with the space program") — but exactly wrong for a breadth request. Ask "summarize the news" in `voice` and the model faithfully compresses ten headlines into two sentences: it leads with the top story and gestures vaguely at the rest, because a two-sentence budget structurally cannot hold ten items. Nothing is hallucinated — it's the length budget destroying nine-tenths of the point.
+
+`digest` inverts the framing. Its style instruction tells the model to **list each distinct item or key point as its own short line, preserving specific names, numbers, and dates, and not to merge separate items or drop them to save space.** It also carries two larger budgets than the other styles, because preservation is the whole job:
+
+- **Output:** `SYNTHESIS_DIGEST_MAX_CHARS` (3000, vs voice's 400), so many items survive rather than being truncated to a couple.
+- **Input:** `SYNTHESIS_DIGEST_INPUT_BUDGET_CHARS` (12000, vs the shared 6000), so a wide result — ten news headlines, a broad fusion — actually reaches the model before per-section apportioning trims it. This is the ceiling on how many items *can* survive at all; a digest can only preserve what it was allowed to see.
+
+Use `digest` for "summarize", "list", or "read me all the …" requests; keep `voice`/`brief`/`detailed` for questions with a single answer. Two caveats worth knowing:
+
+- **The numeric-grounding gate gets *more* load-bearing, not less.** A dense multi-item digest carries many figures, and every one must appear verbatim in the source or the whole answer is rejected. For fidelity that's the point — it's what stops a "summary" from quietly inventing a number — but it does mean a digest that reformats or rounds a figure is more likely to trip `synthesis_rejected: numeric` and fall back to the raw result. Watch that event when soaking a digest deployment.
+- **Attribution stays whole-answer, not per-item.** The trailing `(news)` / `(web, news)` covers the digest as a whole; per-item source tags are the same "precision theater" non-goal (§9) that rules out per-sentence citations elsewhere.
+
+For voice specifically, `digest` is reachable only if the caller sets it — the `mnemolis_intents` tool exposes `answer_style` so the conversation agent can pick `digest` for list-shaped questions while defaulting to `voice` for everything else (mnemolis_intents v1.4.1+).
 
 ## The pipeline
 

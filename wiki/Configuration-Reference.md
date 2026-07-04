@@ -82,6 +82,8 @@ Opt-in, per-request LLM composition of a short, grounded answer *from the retrie
 | `SYNTHESIS_MIN_INPUT_CHARS` | `200` | Results shorter than this skip synthesis entirely — a one-line HA state answer like "Front Door: locked" is already the ideal voice answer, and rewriting it can only add risk. This rule alone exempts most `ha`/`uptime` traffic |
 | `SYNTHESIS_MAX_CHARS` | `2000` | `answer_style=detailed` ceiling. Over-budget replies are truncated at the last sentence boundary under the cap, never mid-sentence |
 | `SYNTHESIS_VOICE_MAX_CHARS` | `400` | `answer_style=voice` ceiling (≈≤2 sentences, for TTS). `brief` (the default style) is fixed at 800 — an internal middle point, not a deployment preference |
+| `SYNTHESIS_DIGEST_MAX_CHARS` | `3000` | `answer_style=digest` output ceiling (v3.55.1). Larger than the other styles because digest preserves many distinct items ("summarize/list/read me everything" queries) rather than fusing them into one answer — see [Answer Synthesis](Answer-Synthesis#the-digest-style--preserve-items-dont-fuse-them-v3551) |
+| `SYNTHESIS_DIGEST_INPUT_BUDGET_CHARS` | `12000` | Input-material budget for `digest` only (v3.55.1), larger than the shared `SYNTHESIS_INPUT_BUDGET_CHARS` so a wide multi-item result reaches the model before per-section apportioning trims it. This is the ceiling on how many items a digest *can* preserve at all |
 
 ## Caching
 
