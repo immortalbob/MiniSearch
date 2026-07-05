@@ -1,6 +1,6 @@
 # Sources
 
-Every query Mnemolis answers eventually resolves to one or more of these seven sources. Each is a real, independent backend — there's no shared internal "knowledge base," just a router deciding which external service (or combination) is most likely to have the answer.
+Every query Mnemolis answers eventually resolves to one or more of these eight sources. Each is a real, independent backend — there's no shared internal "knowledge base," just a router deciding which external service (or combination) is most likely to have the answer.
 
 | Source | Backend | What it actually does |
 |--------|---------|------------------------|
@@ -11,6 +11,7 @@ Every query Mnemolis answers eventually resolves to one or more of these seven s
 | `uptime` | [Uptime Kuma](https://uptime.kuma.pet/) | Status of whatever you're monitoring — reports down services, or confirms everything's up |
 | `ha` | [Home Assistant](https://www.home-assistant.io/) | Entity state summaries — lights, locks, sensors, motion, batteries, power |
 | `changes` | Snapshot Engine (internal) | "What changed since X" — diffs across the four sources above that get periodically snapshotted |
+| `history` | History Engine (internal) | Recorded time series over the house's own sensors/services — highs, lows, averages, counts, trends. Off by default (`HISTORY_ENABLED`) |
 
 Two more values exist but aren't really sources in their own right:
 
@@ -77,6 +78,16 @@ Full setup details (generating a long-lived access token, the exact config vars)
 Not a live backend at all — it reads from Mnemolis's own snapshot history, captured every 2–60 minutes (interval varies per source) by a background scheduler, and diffs the most recent snapshot against an earlier one to report what actually changed: outages and recoveries, meaningful weather shifts, new headlines, lock/door/battery state changes.
 
 Time-window phrases ("this morning," "while I was at work") resolve to a specific hour window using your configured `MORNING_START_HOUR` and `WORK_START_HOUR`. Full mechanics, including why outage/weather changes are collapsed to net change while news/HA events are reported individually, live in [Snapshot Engine & Changes](Snapshot-Engine-and-Changes).
+
+---
+
+## `history` — Time-Series Memory (opt-in)
+
+Also not a live backend — it reads from Mnemolis's own recorded sample history. Where `changes` answers *"what's different since X,"* `history` answers *"what were the actual values over X"*: highs, lows, averages, counts, and trends over the numeric sensors (temperature, CO2, humidity, power, battery…) and service-uptime counts the snapshot path already fetches every few minutes but previously threw away after diffing.
+
+Off by default (`HISTORY_ENABLED=false`) because it has a real, bounded on-disk cost. The sampler piggybacks on the same Home Assistant fetch `snapshot_ha` already makes — enabling it adds **zero** additional HA load. Event counts (*"how many times did the front door open today"*) read the temporal feature's event table read-only, so they additionally require `TEMPORAL_PATTERN_DETECTION_ENABLED=true`.
+
+Answers are assembled deterministically — no LLM anywhere in the aggregation path — and every answer states its actual data coverage when a question reaches back further than recording has existed. Full mechanics, the retention math, and the trend gates live in [History & Trends](History-and-Trends).
 
 ---
 

@@ -76,7 +76,7 @@ The v3.51.1 external function-by-function review and the two releases implementi
 A set of design documents authored as a development roadmap to extend Mnemolis's existing capabilities rather than add unrelated features. They are built and tested one at a time.
 
 - ✅ **Answer Synthesis** — per-request `synthesize=true` grounded answer composition, with `voice`/`brief`/`detailed`/`digest` styles. See [Answer Synthesis](Answer-Synthesis). Shipped v3.55.0–v3.55.2.
-- ⬜ **History-Time-Series-Source**
+- ✅ **History/Time-Series Source** — the `history` source: time-series memory over the house's own numeric sensors and service state, with deterministic highs/lows/averages/counts/trends, coverage disclosure, and the shared `resolve_window()` extraction (`changes` byte-identity preserved). See [History & Trends](History-and-Trends). Shipped v3.56.0.
 - ⬜ **Sentinel-Standing-Queries**
 - ⬜ **Conversational-Sessions**
 - ⬜ **Access-Partitioning-and-Memory**

@@ -100,6 +100,7 @@ Opt-in, per-request LLM composition of a short, grounded answer *from the retrie
 | `CACHE_TTL_HA_SECONDS` | `30` | Result cache TTL for `ha` (the shortest of any source — lights and locks change state constantly) |
 | `CACHE_TTL_CHANGES_SECONDS` | `120` | Result cache TTL for `changes` |
 | `CACHE_TTL_FUSION_SECONDS` | `1800` | Result cache TTL for `fusion` |
+| `CACHE_TTL_HISTORY_SECONDS` | `300` | Result cache TTL for `history` — 5 minutes, matching the sampler cadence: the underlying data can't advance faster than the sampler writes it |
 
 ## Kiwix tuning
 
@@ -148,6 +149,23 @@ Opt-in, per-request LLM composition of a short, grounded answer *from the retrie
 | `TEMPORAL_PATTERN_SIGNIFICANCE_LEVEL` | `0.05` | The per-comparison significance level, before Bonferroni correction divides it by the number of pairs actually tested in a given pass |
 | `TEMPORAL_PATTERN_VALIDATION_WINDOW_HOURS` | `24` | How much later, non-overlapping data a candidate needs to be re-checked against before it can be promoted to `confirmed` |
 | `TEMPORAL_PATTERN_STALE_GRACE_MULTIPLIER` | `3` | Same role as `SNAPSHOT_STALE_GRACE_MULTIPLIER` — how many missed mining intervals before [`/health`](Cross-Source-Temporal-Pattern-Detection#health-reporting) flags this job stale |
+
+## History source
+
+The [`history` source](History-and-Trends) — time-series memory over the house's own numeric sensors and service state, shipped in v3.56.0 and off by default.
+
+| Variable | Default | Notes |
+|----------|---------|-------|
+| `HISTORY_ENABLED` | `false` | Master on/off switch for the [History source](History-and-Trends). Checked both at the snapshot-hook call sites and inside the ingest functions themselves (the same defense-in-depth the temporal and adversarial jobs use); `false` reads as `{"status": "disabled"}` in `/health` and both `/history/*` endpoints. There is deliberately **no sampling-interval setting**: ingestion rides inside `snapshot_ha` (5 min) and `snapshot_uptime` (2 min), consuming the payloads those jobs already fetched, so its cadence is theirs and a knob couldn't change when data actually arrives. Off by default because it has a real on-disk cost — see `HISTORY_RETENTION_DAYS` |
+| `HISTORY_RETENTION_DAYS` | `90` | Samples (and catalog rows unseen for this long) older than this are pruned in the sampler tick, batched to keep WAL growth bounded. ~40 numeric entities ≈ 60–80 MB at 90 days; scales linearly with entity count, so large deployments should bound the tracked set rather than be surprised by the database size |
+| `HISTORY_DEVICE_CLASSES` | `temperature,humidity,carbon_dioxide,power,energy,illuminance,pressure,battery` | Which HA `device_class` values the sampler keeps. `battery` is included on purpose — the snapshot path already watches batteries for low-battery alerts, so recording them answers "how fast is that node's battery draining" for free; the button-cell noise cost is handled by the exclude list below, not by dropping the class |
+| `HISTORY_EXTRA_ENTITIES` | *(blank)* | Allowlist for numeric sensors with no (or an unclassified) `device_class` that are still worth recording — comma-separated entity IDs |
+| `HISTORY_EXCLUDE_ENTITIES` | *(blank)* | Denylist — entity IDs the sampler must never keep even when they pass the device-class filter |
+| `HISTORY_TREND_MIN_SAMPLES` | `12` | A trend direction is never asserted below this many real samples in the window — the temporal miner's min-occurrences discipline applied to slopes. Below it, an explicit trend question is told the window's too short; a plain summary just omits the trend line |
+| `HISTORY_TREND_MIN_DELTA` | `0.1` | Per-window, unit-free noise floor: the fitted change across the window must clear this fraction of the window's own observed value range to count as rising/falling rather than "roughly flat." Adapts to each sensor's natural spread, so one setting behaves sensibly for ppm and degrees alike |
+| `HISTORY_STALE_GRACE_MULTIPLIER` | `3` | Same role as `SNAPSHOT_STALE_GRACE_MULTIPLIER` — how many multiples of the HA snapshot interval (the cadence ingestion actually rides) before [`/health`](Health-and-Observability) flags the `history` job stale |
+
+Event counts (*"how many times did the door open"*) read the temporal feature's event table read-only, so they additionally require `TEMPORAL_PATTERN_DETECTION_ENABLED=true` — with it off, the answer says event history is unavailable rather than returning a confident zero.
 
 ## Security
 

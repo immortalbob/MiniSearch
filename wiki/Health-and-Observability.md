@@ -15,6 +15,7 @@ Three real gaps got found and closed during a deliberate operational-maturity re
   "snapshot_jobs": { "...": "see below" },
   "adversarial_testing": { "...": "see below" },
   "temporal_pattern_detection": { "...": "see below" },
+  "history": { "...": "see below" },
   "sources": { "...": "see below" }
 }
 ```
@@ -28,6 +29,8 @@ Three real gaps got found and closed during a deliberate operational-maturity re
 **`adversarial_testing`** — same `ok` / `stale` / `never_ran` shape as `snapshot_jobs`, plus `total_combinations_tried` and `flagged_for_review` counts. See [Adversarial Self-Testing](Adversarial-Self-Testing) for the full feature; flagged combinations themselves are reviewed via `GET /adversarial/flagged`, not through `/health` directly.
 
 **`temporal_pattern_detection`** — same overall shape, plus one status the other two jobs don't have: `insufficient_data`, reported when the job ran successfully but the real event volume in its most recent window was below the floor needed to test even one pair. This is the expected, honest state for the first weeks of this feature's life on real homelab data volumes, not a failure — see [Cross-Source Temporal Pattern Detection](Cross-Source-Temporal-Pattern-Detection#health-reporting) for the full set of states and what each one actually means.
+
+**`history`** — `{"status": "disabled"}` when `HISTORY_ENABLED` is false (the same convention as the two jobs above), otherwise the ingest's `ok` / `stale` / `never_ran` status against the HA snapshot interval × `HISTORY_STALE_GRACE_MULTIPLIER` (history ingests inside the snapshot jobs rather than running its own — see [History & Trends](History-and-Trends)), plus real operational numbers: `metrics_tracked`, `samples_24h`, oldest/newest sample timestamps, `db_mb` (the on-disk cost made visible, since retention math is a real sizing decision — see [History & Trends](History-and-Trends)), and `quiet_sensors` — catalog entries whose `last_seen` has gone stale. That last one exists because a sensor going silent (a voice-satellite node dropping off the network, a battery dying mid-deployment) is exactly the kind of failure that otherwise only surfaces when someone asks a question and gets stale data; here it's visible on the same endpoint everything else reports to.
 
 ## Background job health
 

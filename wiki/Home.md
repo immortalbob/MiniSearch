@@ -22,7 +22,7 @@ This wiki holds the deep-dive material that doesn't belong in the [README](https
 
 The actual path a query takes, roughly in the order it's useful to read them:
 
-- **[Sources](Sources)** — what each backend (`kiwix`, `forecast`, `news`, `web`, `uptime`, `ha`, `changes`) actually does, and where its data comes from
+- **[Sources](Sources)** — what each backend (`kiwix`, `forecast`, `news`, `web`, `uptime`, `ha`, `changes`, `history`) actually does, and where its data comes from
 - **[Conditional Query Detection](Conditional-Query-Detection)** — the `"if X, Y"` feature: checked first, before decomposition, since a leading conditional is structurally one statement, not a flat list of independent intents
 - **[Query Decomposition](Query-Decomposition)** — how compound questions get split into independent sub-intents, including the mixed-conjunction and proper-noun-pair handling
 - **[Routing](Routing)** — how each resulting piece — a plain query, an extracted condition, or a decomposed sub-query — gets from "what you typed" to "which source(s) answer it": keyword matching, LLM-assisted selection, and the discourse-framing bias
@@ -30,6 +30,7 @@ The actual path a query takes, roughly in the order it's useful to read them:
 - **[Fusion](Fusion)** — how multiple sources get queried concurrently and merged into one coherent response
 - **[Answer Synthesis](Answer-Synthesis)** — the final stage of the path (default on, gated per-request via `synthesize=true`): the local LLM composes a short, grounded answer *from the retrieved material only*, returned in a separate `answer` field alongside the raw `result` — never instead of it. `voice`/`brief`/`detailed`/`digest` styles; additive by contract; grounded-or-silent through a stack of sanity gates (numeric grounding, attribution, honest NOT_IN_SOURCES miss). Built for the voice pipeline, where TTS would otherwise read fused headers aloud
 - **[Snapshot Engine & Changes](Snapshot-Engine-and-Changes)** — the background scheduler that captures source state over time, diffs it, and answers "what changed since X"
+- **[History & Trends](History-and-Trends)** — the `history` source (off by default): time-series memory over the house's own numeric sensors and service state, answering highs/lows/averages/counts/trends over real recorded samples — piggybacking on the snapshot path's existing HA fetch, with coverage disclosure when a question reaches back further than the data does
 - **[Caching](Caching)** — the result cache and routing cache: what's cached, for how long, and how size is bounded
 - **[Semantic Routing Cache](Semantic-Routing-Cache)** — the optional third cache layer: embedding-based reuse of routing decisions across *rephrasings* of the same question, so "will it rain later" borrows "will it rain this evening"'s already-made decision instead of paying its own cold LLM call. Opt-in via `EMBEDDING_MODEL`, deliberately conservative about what counts as "the same question," and decisions always come from the live routing cache — this layer stores only vectors
 - **[Timezone Conversion](Timezone-Conversion)** — converting stored UTC timestamps into real local time, and why this needed its own dedicated piece rather than reusing `_hours_since()`'s existing logic
@@ -56,7 +57,7 @@ One real cross-cutting dependency worth knowing about up front: the discourse-fr
 - **[Adversarial Self-Testing](Adversarial-Self-Testing)** — the background job that generates combinatorial edge-case queries from Mnemolis's own real vocabulary and flags structural anomalies for review (opt-in — off by default)
 - **[Cross-Source Temporal Pattern Detection](Cross-Source-Temporal-Pattern-Detection)** — the background job that mines `ha`/`uptime` event history for statistically-corrected, out-of-sample-validated timing relationships, with correlation-not-causation framing baked into every result
 - **[Troubleshooting](Troubleshooting)** — the real problems found and fixed this project's life, indexed by symptom (start here if something's broken)
-- **[Backup & Restore](Backup-and-Restore)** — the six data files, the Docker volume naming gotcha, and how to actually restore from a backup
+- **[Backup & Restore](Backup-and-Restore)** — the seven data files, the Docker volume naming gotcha, and how to actually restore from a backup
 - **[Benchmarks](Benchmarks)** — real performance data across every major release, cold cache vs. warm cache
 - **[Adding a New Source](Adding-a-New-Source)** — the four files a contributor touches, and the one optional fifth (fallback chains)
 

@@ -1,6 +1,6 @@
 # Backup & Restore
 
-Mnemolis's entire persisted state lives in exactly six files, all under `/app/data` inside the container:
+Mnemolis's entire persisted state lives in exactly seven files, all under `/app/data` inside the container:
 
 | File | What it holds |
 |------|-----------------|
@@ -10,8 +10,9 @@ Mnemolis's entire persisted state lives in exactly six files, all under `/app/da
 | `snapshots.db` | [Snapshot history](Snapshot-Engine-and-Changes) for the background diff engine |
 | `adversarial_testing.db` | [Adversarial self-testing](Adversarial-Self-Testing) combination history — synthetic generated queries only, never real user queries |
 | `temporal_patterns.db` | [Cross-source temporal pattern detection](Cross-Source-Temporal-Pattern-Detection) event history and mined pattern candidates |
+| `history.db` | [History source](History-and-Trends) metric samples and catalog — only present once `HISTORY_ENABLED` has been turned on; backing it up is what preserves the recorded time series across a rebuild, since the feature cannot retroactively re-record the past |
 
-`GET /backup` tars all six into a downloadable `.tar.gz`. `GET /backup/info` shows what's currently in each file (size, last-modified time) without actually creating a backup — useful for a quick "is this worth backing up right now" check.
+`GET /backup` tars all seven into a downloadable `.tar.gz` (files that don't exist yet — like `history.db` before the feature's first enablement — are simply skipped). `GET /backup/info` shows what's currently in each file (size, last-modified time) without actually creating a backup — useful for a quick "is this worth backing up right now" check.
 
 **The SQLite files are snapshotted through SQLite's own online backup API before tarring (v3.52.0).** Every Mnemolis database runs in WAL mode, which means the main `.db` file on disk is *not* the complete database at an arbitrary moment — recently committed writes live in the `-wal` sidecar file until the next checkpoint. A function-by-function audit found the previous behavior (tar the bare `.db` directly) silently produced backups missing every not-yet-checkpointed write, and a copy taken mid-commit could even be internally inconsistent. `Connection.backup()` exists for exactly this: it produces a complete, consistent, checkpointed single-file snapshot while concurrent writers keep working, no downtime needed. Each `.db` is snapshotted to a temp file first and the snapshot is what enters the tarball; the JSON files (already written atomically) are tarred directly as before. If the backup API fails on a given file — a genuinely corrupted database — the endpoint falls back to the old raw copy with a logged warning, since a possibly-stale backup of that one file still beats silently omitting it. The regression test for this constructs the exact hazard (WAL mode, autocheckpointing off, the writer connection held open across the call) and asserts the un-checkpointed row survives extraction — confirmed to fail against the old behavior.
 
