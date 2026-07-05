@@ -509,7 +509,7 @@ class Settings(BaseSettings):
     cache_ttl_ha_seconds: int = 30            # 30 seconds
     cache_ttl_changes_seconds: int = 120      # 2 minutes — changes are near-real-time
     cache_ttl_fusion_seconds: int = 1800      # 30 minutes
-    cache_ttl_history_seconds: int = 300      # 5 minutes — the sampler only advances every HISTORY_SAMPLE_INTERVAL_MINUTES anyway
+    cache_ttl_history_seconds: int = 300      # 5 minutes — data only advances on the HA snapshot ticks the ingest rides anyway
 
     # -------------------------------------------------------------------
     # API key authentication — protects /search and /changes

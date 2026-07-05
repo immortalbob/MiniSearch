@@ -278,3 +278,107 @@ class TestCosmeticsAuditRegressions:
         with patch("app.sources.home_assistant._detect_area", return_value=None):
             out = HS.search("services up today")
         assert "(1 sample)" in out
+
+
+class TestFieldFindingsFirstDeployment:
+    """Regression pins for the five issues found on the first real
+    deployment (MiniDock, v3.56.0 soak) — behaviors no test pinned
+    because no test data had a device named after a class word, a
+    partially-covered area, or a window crossing local midnight."""
+
+    def test_cold_and_hot_imply_temperature(self):
+        from app.history import _detect_class
+        assert _detect_class("how cold did it get last night") == "temperature"
+        assert _detect_class("how hot did it get today") == "temperature"
+
+    def test_class_detection_is_word_bounded(self):
+        from app.history import _detect_class
+        assert _detect_class("show me my photos from today") is None      # not "hot"
+        assert _detect_class("how many attempts were made") is None       # not "temp"
+
+    def test_sensor_named_after_class_word_does_not_hijack(self, enabled, temp_history_db):
+        # A device literally named "Temperature" plus other temperature
+        # sensors: "average temperature today" must ASK, not silently
+        # pick the name-collision sensor.
+        _seed(temp_history_db, [
+            ("sensor.mystery", 99.9, "°F", "Temperature", "", "temperature"),
+            ("sensor.lr", 74.0, "°F", "Living Room Temperature", "living_room", "temperature"),
+        ])
+        with patch("app.sources.home_assistant._detect_area", return_value=None):
+            out = HS.search("average temperature today")
+        assert "which did you mean" in out
+        assert "99.9" not in out
+
+    def test_named_sensor_still_matches_when_name_is_not_a_class_word(self, enabled, temp_history_db):
+        _seed(temp_history_db, [
+            ("sensor.lr", 74.0, "°F", "Living Room Temperature", "living_room", "temperature"),
+            ("sensor.cpu", 99.9, "°F", "CPU Temp", "", "temperature"),
+        ])
+        with patch("app.sources.home_assistant._detect_area", return_value=None):
+            out = HS.search("cpu temp today")
+        assert "CPU Temp" in out and "99.9" in out
+
+    def test_area_substitution_is_disclosed(self, enabled, temp_history_db):
+        # "office co2" with no office CO2 sensor and exactly one CO2
+        # sensor anywhere: answer it, but say so.
+        _seed(temp_history_db, [
+            ("sensor.lr_co2", 451.0, "ppm", "LivingRoom CO2", "living_room", "carbon_dioxide"),
+        ])
+        with patch("app.sources.home_assistant._detect_area", return_value="office"):
+            out = HS.search("office co2 today")
+        assert "No carbon dioxide sensor recorded in office" in out
+        assert "LivingRoom CO2" in out and "451" in out
+
+    def test_area_substitution_with_several_candidates_asks(self, enabled, temp_history_db):
+        _seed(temp_history_db, [
+            ("sensor.lr_co2", 451.0, "ppm", "LivingRoom CO2", "living_room", "carbon_dioxide"),
+            ("sensor.br_co2", 520.0, "ppm", "Bedroom CO2", "bedroom", "carbon_dioxide"),
+        ])
+        with patch("app.sources.home_assistant._detect_area", return_value="office"):
+            out = HS.search("office co2 today")
+        assert "which did you mean" in out
+
+    def test_sub_hour_coverage_grammar(self, enabled, temp_history_db):
+        _seed(temp_history_db, [
+            ("sensor.lr", 74.0, "°F", "Living Room Temperature", "living_room", "temperature"),
+        ], when=datetime.now(timezone.utc) - timedelta(minutes=5))
+        with patch("app.sources.home_assistant._detect_area", return_value=None):
+            out = HS.search("living room temperature this week")
+        assert "only under an hour of recorded data" in out
+        assert "the past under an hour" not in out
+
+    def test_rolling_window_crossing_midnight_gets_dated_times(self):
+        # "today" is the pinned rolling-24h changes semantic; at any time
+        # other than just-past-midnight it crosses local midnight, so a
+        # bare "5:25 PM" could be yesterday (in the field, it was).
+        with patch.object(settings, "local_timezone", "UTC"):
+            assert HS._window_dated("2026-07-04T14:00:00Z", "2026-07-05T14:00:00Z") is True
+
+    def test_bounded_single_day_window_stays_undated(self):
+        # "yesterday" (00:00 -> 24:00 local) is one calendar day; times
+        # inside it need no date. The end-boundary midnight must not
+        # count as a second day.
+        with patch.object(settings, "local_timezone", "UTC"):
+            assert HS._window_dated("2026-07-04T00:00:00Z", "2026-07-05T00:00:00Z") is False
+
+    def test_class_word_named_candidate_is_area_qualified_in_ask(self, enabled, temp_history_db):
+        # Field finding: an outdoor sensor named just "Temperature"
+        # appeared in the ambiguity ask as an option that its own name
+        # could never select. The ask must teach the working phrasing.
+        _seed(temp_history_db, [
+            ("sensor.cotech", 99.9, "°F", "Temperature", "outside", "temperature"),
+            ("sensor.lr", 74.0, "°F", "Living Room Temperature", "living_room", "temperature"),
+        ])
+        with patch("app.sources.home_assistant._detect_area", return_value=None):
+            out = HS.search("average temperature today")
+        assert "Temperature (outside)" in out
+        assert "Living Room Temperature" in out
+
+    def test_outdoor_sensor_resolves_via_area_class(self, enabled, temp_history_db):
+        _seed(temp_history_db, [
+            ("sensor.cotech", 99.9, "°F", "Temperature", "outside", "temperature"),
+            ("sensor.lr", 74.0, "°F", "Living Room Temperature", "living_room", "temperature"),
+        ])
+        with patch("app.sources.home_assistant._detect_area", return_value="outside"):
+            out = HS.search("how cold did it get outside today")
+        assert "99.9" in out and "which did you mean" not in out

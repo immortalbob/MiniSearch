@@ -49,6 +49,19 @@ A deliberate adversarial pass over the freshly written feature, before release, 
 ### Changed (audit delta)
 - Test suite: **1683 passing** (from 1645 pre-audit — 38 new regression pins), ruff clean. Config removed: `HISTORY_SAMPLE_INTERVAL_MINUTES`. README, `docker-compose.example.yml`, and the `History-and-Trends` / `Configuration-Reference` / `Health-and-Observability` wiki pages corrected to describe the real ingest-hook mechanism, including an honest account of the first cut's constraint violation.
 
+### Fixed — field findings from the first real deployment (same release)
+
+Five more, surfaced within the first fifteen minutes of the feature running on real MiniDock data — every one a behavior no test pinned because no test data had a device named after a class word, a partially-covered area, or a rolling window crossing midnight:
+
+- **A sensor literally named "Temperature" hijacked class queries** — *"average temperature today"* silently answered with one mystery device (99.9 °F) out of five temperature sensors, because friendly-name matching runs before class resolution. Names that ARE bare class words are now skipped in the name-match step; the class logic owns the question and asks when several candidates exist.
+- **A named area with no matching sensor silently substituted another room** — *"office co2"* answered with the living-room sensor, no disclosure. The fall-through is now allowed only when the class match is unambiguous, and it announces itself: *"No carbon dioxide sensor recorded in office — showing LivingRoomLilyGo Room CO2."* Several candidates → it asks.
+- **"how cold did it get last night" routed to history and then dead-ended unresolved** — "cold" wasn't in the class vocabulary its own intent trigger implies. `cold`/`hot`/`warm`/`freezing`/`chilly` now resolve to `temperature`, and `_detect_class` switched to word-boundary matching while gaining short words (no "hot" inside *photos*, no "temp" inside *attempts*).
+- **Rolling windows crossing local midnight showed undated times** — *"1 opening today, most recently 5:25 PM"* read as impossible at 2 PM; the opening was *yesterday* 5:25 PM, legitimately inside the pinned rolling-24h "today" window. Timestamps are now date-qualified whenever the window crosses local midnight, not just past 26 hours; bounded single-day windows ("yesterday") stay clean.
+- **"(only the past under an hour of recorded data)"** — the audit's own sub-hour cosmetic fix produced broken grammar in the coverage template; now *"(only under an hour of recorded data)"*.
+- **The ambiguity ask listed unpickable options** — a candidate whose friendly name IS a bare class word (a real outdoor sensor named just "Temperature") can't be chosen by that name, since the name-collision rule skips it on the follow-up too. Such candidates (and duplicate names) are now area-qualified in the listing — *"Temperature (outside)"* — teaching the phrasing that actually resolves.
+
+Test suite after field fixes: **1694 passing** (11 new field-finding pins), ruff clean.
+
 ---
 
 ## [3.55.2]

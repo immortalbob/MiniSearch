@@ -53,12 +53,16 @@ def _resolve_aggregation(query: str) -> str:
 
 class _MetricResolution:
     """metric: the single resolved entry; candidates: entries to offer when
-    ambiguous; neither set means fully unresolved."""
-    __slots__ = ("metric", "candidates")
+    ambiguous; neither set means fully unresolved. note: a one-line honesty
+    disclosure to prepend when resolution succeeded but not on the exact
+    terms the query asked (e.g. the named area has no such sensor and the
+    unique class match elsewhere was used instead)."""
+    __slots__ = ("metric", "candidates", "note")
 
-    def __init__(self, metric=None, candidates=None):
+    def __init__(self, metric=None, candidates=None, note=None):
         self.metric = metric
         self.candidates = candidates or []
+        self.note = note
 
 
 def _resolve_metric(query: str, catalog: list) -> _MetricResolution:
@@ -77,10 +81,17 @@ def _resolve_metric(query: str, catalog: list) -> _MetricResolution:
     #    on word boundaries (the _detect_area \b discipline) rather than
     #    raw substring, so a short friendly name like "AC" or "TV" can't
     #    false-match inside an unrelated word ("A" inside "was").
+    # Names that ARE bare class words are skipped in step 1 (field
+    # finding from first deployment): a device literally named
+    # "Temperature" made "average temperature today" silently pick that
+    # one sensor out of five — a plausible number for the wrong thing.
+    # When the matched name is itself a class word, the class logic below
+    # owns the question, and with several candidates it asks instead of
+    # guessing.
     import re
     for entry in sorted(catalog, key=lambda c: len(c.friendly_name), reverse=True):
         fn = (entry.friendly_name or "").lower()
-        if fn and re.search(r"\b" + re.escape(fn) + r"\b", q):
+        if fn and fn not in _CLASS_WORDS and re.search(r"\b" + re.escape(fn) + r"\b", q):
             return _MetricResolution(metric=entry)
 
     area = _detect_area(query)
@@ -93,6 +104,20 @@ def _resolve_metric(query: str, catalog: list) -> _MetricResolution:
             return _MetricResolution(metric=combo[0])
         if len(combo) > 1:
             return _MetricResolution(candidates=combo)
+        # The named area has NO sensor of this class. Falling through to
+        # the bare-class match silently substitutes another room (field
+        # finding: "office co2" answered with the living-room sensor and
+        # no disclosure) — so the substitution is allowed only when it is
+        # unambiguous, and it announces itself.
+        by_class = [c for c in catalog if c.device_class == cls]
+        cls_word = cls.replace("_", " ")
+        if len(by_class) == 1:
+            return _MetricResolution(
+                metric=by_class[0],
+                note=(f"No {cls_word} sensor recorded in {area.replace('_', ' ')} — "
+                      f"showing {by_class[0].friendly_name}."))
+        if len(by_class) > 1:
+            return _MetricResolution(candidates=by_class)
 
     # 3. bare device-class word.
     if cls:
@@ -122,18 +147,35 @@ def _local_clock(ts: str) -> str:
     return dt.strftime("%I:%M %p").lstrip("0")
 
 
-def _local_when(ts: str, span_hours: float) -> str:
-    """Span-aware timestamp: a bare clock time is unambiguous inside a
-    single day, but "most recently 9:20 PM" over a 7-day window doesn't
-    say WHICH day (audit finding) — so past ~26h the local date rides
-    along: 'Jul 3, 9:20 PM'."""
-    if span_hours <= 26:
+def _local_when(ts: str, dated: bool) -> str:
+    """Window-aware timestamp: a bare clock time is unambiguous inside a
+    single calendar day, but ambiguous over multi-day windows AND over
+    rolling windows that cross local midnight (see _window_dated) — when
+    dated, the local date rides along: 'Jul 3, 9:20 PM'."""
+    if not dated:
         return _local_clock(ts)
     try:
         dt = utc_string_to_local(ts)
     except Exception:
         return ts
     return f"{dt.strftime('%b')} {dt.day}, " + dt.strftime("%I:%M %p").lstrip("0")
+
+
+def _window_dated(start_utc: str, end_utc: str) -> bool:
+    """True when timestamps inside this window need a date to be
+    unambiguous: either it's longer than ~a day, or it CROSSES local
+    midnight — the rolling 'today' window (last 24h, the pinned changes
+    semantic) almost always spans two calendar days, so 'most recently
+    5:25 PM' could be yesterday (field finding: it was)."""
+    if _span_hours(start_utc, end_utc) > 26:
+        return True
+    from datetime import timedelta
+    try:
+        s_local = utc_string_to_local(start_utc)
+        e_local = utc_string_to_local(end_utc) - timedelta(seconds=1)
+        return s_local.date() != e_local.date()
+    except Exception:
+        return False
 
 
 def _span_hours(start_utc: str, end_utc: str) -> float:
@@ -202,7 +244,7 @@ def _answer_events(query: str, start_utc: str, end_utc: str, window_label: str) 
 
     result = history.count_events(query, start_utc, end_utc, entity_hint=_entity_hint(query))
     _emit_event("events", window_label, "count", result.count)
-    span = _span_hours(start_utc, end_utc)
+    dated = _window_dated(start_utc, end_utc)
 
     if not result.matched:
         return ("I couldn't identify which kind of event you mean. I can count "
@@ -213,7 +255,7 @@ def _answer_events(query: str, start_utc: str, end_utc: str, window_label: str) 
     phrase = _window_phrase(window_label)
     if result.count == 0:
         return f"No {result.noun}s recorded {phrase}."
-    when = f", most recently {_local_when(result.last_ts, span)}." if result.last_ts else "."
+    when = f", most recently {_local_when(result.last_ts, dated)}." if result.last_ts else "."
     return f"{result.count} {noun} {phrase}{when}"
 
 
@@ -237,7 +279,23 @@ def _answer_metric(query: str, start_utc: str, end_utc: str, window_label: str) 
     resolution = _resolve_metric(query, catalog)
     if resolution.metric is None:
         if resolution.candidates:
-            names = ", ".join(c.friendly_name for c in resolution.candidates)
+            # A candidate whose friendly name IS a bare class word can't
+            # be chosen by that name (the name-collision rule skips it),
+            # so the listing must teach the phrasing that works: its area
+            # (field finding — an outdoor sensor named just "Temperature"
+            # appeared in the ask as an unpickable option). Same
+            # qualifier for duplicate names, where the bare name would be
+            # ambiguous a second time.
+            seen = [c.friendly_name.lower() for c in resolution.candidates]
+            labels = []
+            for c in resolution.candidates:
+                fn = c.friendly_name
+                needs_area = (fn.lower() in _CLASS_WORDS or seen.count(fn.lower()) > 1)
+                if needs_area and c.area_id:
+                    labels.append(f"{fn} ({c.area_id.replace('_', ' ')})")
+                else:
+                    labels.append(fn)
+            names = ", ".join(labels)
             _emit_event("", window_label, "ambiguous", 0)
             return (f"Several recorded sensors match that — which did you mean? {names}.")
         _emit_event("", window_label, "summary", 0)
@@ -266,15 +324,26 @@ def _answer_metric(query: str, start_utc: str, end_utc: str, window_label: str) 
         end_dt = datetime.strptime(end_utc, TIMESTAMP_FORMAT).replace(tzinfo=timezone.utc)
         old_dt = datetime.strptime(oldest, TIMESTAMP_FORMAT).replace(tzinfo=timezone.utc)
         covered = (end_dt - old_dt).total_seconds() / 3600
-        coverage_label = f"{window_label} (only the past {_humanize_hours(covered)} of recorded data)"
+        humanized = _humanize_hours(covered)
+        if humanized == "under an hour":
+            # "only the past under an hour of..." — the grammar bug the
+            # first deployment surfaced within its first five minutes.
+            coverage_label = f"{window_label} (only under an hour of recorded data)"
+        else:
+            coverage_label = f"{window_label} (only the past {humanized} of recorded data)"
 
     summary = history.aggregate_series(samples)
     unit = entry.unit
     n = summary.count
     header = f"**{entry.friendly_name} — {coverage_label}** ({n} sample{'s' if n != 1 else ''})"
-    span = _span_hours(start_utc, end_utc)
-    line = (f"Low {history.format_value(summary.minimum, unit)} ({_local_when(summary.min_ts, span)}) · "
-            f"High {history.format_value(summary.maximum, unit)} ({_local_when(summary.max_ts, span)}) · "
+    if resolution.note:
+        # The area-substitution disclosure (see _resolve_metric): the
+        # answer must lead with the fact that it isn't quite what was
+        # asked for.
+        header = resolution.note + "\n" + header
+    dated = _window_dated(start_utc, end_utc)
+    line = (f"Low {history.format_value(summary.minimum, unit)} ({_local_when(summary.min_ts, dated)}) · "
+            f"High {history.format_value(summary.maximum, unit)} ({_local_when(summary.max_ts, dated)}) · "
             f"Average {history.format_value(summary.average, unit)} · "
             f"Now {history.format_value(summary.latest, unit)}")
     lines = [header, line]

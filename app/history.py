@@ -624,6 +624,15 @@ _CLASS_WORDS: dict[str, str] = {
     "carbon": "carbon_dioxide",
     "temperature": "temperature",
     "temp": "temperature",
+    # "how cold did it get" is an intent trigger, so the words that carry
+    # temperature-ness in natural phrasing must resolve to the class —
+    # field finding from first deployment: "how cold did it get last
+    # night" routed here and then dead-ended unresolved.
+    "cold": "temperature",
+    "hot": "temperature",
+    "warm": "temperature",
+    "freezing": "temperature",
+    "chilly": "temperature",
     "humidity": "humidity",
     "power": "power",
     "wattage": "power",
@@ -638,10 +647,15 @@ _CLASS_WORDS: dict[str, str] = {
 
 
 def _detect_class(query: str) -> str | None:
-    """Longest phrase first so 'carbon dioxide' wins over 'carbon'."""
+    """Longest phrase first so 'carbon dioxide' wins over 'carbon'.
+    Word-boundary matched, not raw substring (the discipline every other
+    vocabulary in this feature now follows): with short words like "hot"
+    and "temp" in the table, substring matching would find classes inside
+    "photos" and "attempts"."""
+    import re
     q = query.lower()
     for phrase in sorted(_CLASS_WORDS, key=len, reverse=True):
-        if phrase in q:
+        if re.search(r"\b" + re.escape(phrase) + r"\b", q):
             return _CLASS_WORDS[phrase]
     return None
 
