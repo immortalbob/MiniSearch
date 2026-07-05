@@ -5,7 +5,7 @@ beautifulsoup4
 defusedxml
 pydantic
 pydantic-settings
-mcp[cli]==1.27.2
+mcp[cli]==1.28.1
 uptime-kuma-api
 pytest
 apscheduler
