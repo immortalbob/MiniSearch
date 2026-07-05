@@ -216,6 +216,19 @@ _EMPTY_PHRASES = (
     "unable to retrieve", "no valid sources", "no results returned",
     "no entity states returned", "no matching entities found",
     "no significant changes",
+    # history's four honest-abstention messages (v3.56.0 field finding:
+    # LLM fusion routing includes `history` for phrasings like "latest AI
+    # trends" and "history of ancient rome" — the source's own name pulls
+    # it in — and its plain-prose "couldn't identify" abstention was fused
+    # into otherwise-good answers as a trailing noise block). All four are
+    # plain prose with no `**`, so the structural guard above keeps every
+    # real history answer — whose headers are always `**{name} — …**` —
+    # untouchable by this list. Same verified-against-the-actual-return-
+    # statements discipline as every phrase above.
+    "couldn't identify which sensor", "couldn't identify which kind of event",
+    "sensors match that — which did you mean",
+    "requires temporal pattern detection",
+    "no recorded metrics yet",
 )
 
 

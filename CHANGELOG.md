@@ -4,6 +4,25 @@ All notable changes to Mnemolis are documented here, from v3.45.0 onward. For ev
 
 ---
 
+## [3.56.1]
+
+### Fixed — fusion no longer carries `history`'s honest abstentions as noise
+
+Found while CLI-verifying v3.56.0 for release: *"what are the latest AI trends"* and *"tell me about the history of ancient rome"* correctly avoided the keyword triggers (those regression pins held), but the **LLM fusion picker included the `history` source anyway** — its own NAME attracts it for those phrasings — and its plain-prose *"I couldn't identify which sensor or metric you mean…"* abstention was fused into otherwise-good answers as a trailing noise block.
+
+Fixed with the project's established two-part pattern (the discourse-framing precedent explicitly rejects description-nudging as the sole lever):
+
+- The source **description is corrected where it was genuinely inaccurate** — it now states it covers THIS house's own sensors and services only, NOT world history, general knowledge, news, or public/industry trends.
+- The **verifiable lever**: `history`'s five honest-abstention messages ("couldn't identify which sensor", "couldn't identify which kind of event", the ambiguity ask, "requires temporal pattern detection", "no recorded metrics yet") joined `_looks_empty()`'s canonical phrase list, so fusion drops them exactly as it drops any other member with nothing to contribute. The `**` structural guard means no real history answer (headers are always `**{name} — …**`) can ever match; the plain-prose event-count answers ("1 opening today, …") were verified to survive the new phrases, with pins.
+
+Field-verified before tagging: both genre queries re-run against a live deployment came back with no trailing `[HISTORY]` block, on both fresh phrasings and the original cached-then-expired ones.
+
+### Changed
+- **Dependency: `mcp[cli]` 1.27.2 → 1.28.1** (Dependabot). Full test suite — including the MCP transport tests — run against 1.28.1 before packaging, not just trusted from the PR.
+- Version bumped to 3.56.1. Test suite: **1697 passing** (3 new pins for the abstention/`_looks_empty` contract), ruff clean. One stale comment fixed (`cache_ttl_history_seconds` referenced the removed sampling-interval setting).
+
+---
+
 ## [3.56.0]
 
 ### Added — the `history` source: time-series memory for the house (opt-in, off by default)

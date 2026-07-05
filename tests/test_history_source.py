@@ -382,3 +382,51 @@ class TestFieldFindingsFirstDeployment:
         with patch("app.sources.home_assistant._detect_area", return_value="outside"):
             out = HS.search("how cold did it get outside today")
         assert "99.9" in out and "which did you mean" not in out
+
+    def test_abstention_messages_are_looks_empty_for_fusion(self, enabled, temp_history_db):
+        # Field finding: LLM fusion routing pulled `history` in for
+        # "latest AI trends" / "history of ancient rome" (the source's
+        # own name attracts it) and fused the plain-prose abstention in
+        # as a trailing noise block. The canonical _looks_empty filter
+        # must recognize all five abstentions — and must NOT catch a
+        # real answer, whose header's `**` is the structural guard.
+        from app.sources.fusion import _looks_empty
+        # Empty catalog -> "No recorded metrics yet" abstention.
+        with patch("app.sources.home_assistant._detect_area", return_value=None):
+            assert _looks_empty(HS.search("what are the latest AI trends today")) is True
+
+        _seed(temp_history_db, [
+            ("sensor.lr", 74.0, "°F", "Living Room Temperature", "living_room", "temperature"),
+        ])
+        with patch("app.sources.home_assistant._detect_area", return_value=None):
+            # Populated catalog, unresolvable query -> "couldn't identify".
+            assert _looks_empty(HS.search("what are the latest AI trends today")) is True
+            # A real answer must survive.
+            assert _looks_empty(HS.search("living room temperature today")) is False
+
+    def test_ambiguity_ask_is_looks_empty_for_fusion(self, enabled, temp_history_db):
+        from app.sources.fusion import _looks_empty
+        _seed(temp_history_db, [
+            ("sensor.a", 74.0, "°F", "Living Room Temperature", "living_room", "temperature"),
+            ("sensor.b", 99.9, "°F", "Temperature", "outside", "temperature"),
+        ])
+        with patch("app.sources.home_assistant._detect_area", return_value=None):
+            ask = HS.search("average temperature today")
+        assert "which did you mean" in ask
+        assert _looks_empty(ask) is True
+
+    def test_event_count_answer_is_not_looks_empty(self, enabled, temp_temporal_db):
+        # "1 opening today, most recently …" is plain prose with no `**`;
+        # it must survive the new phrases. Same for the honest zero.
+        from app.sources.fusion import _looks_empty
+        now = datetime.now(timezone.utc)
+        con = sqlite3.connect(temp_temporal_db)
+        con.execute("INSERT INTO temporal_events (source, event_type, timestamp, raw_detail) "
+                    "VALUES (?,?,?,?)",
+                    ("ha", "binary_sensor.front_door:opened", _iso(now - timedelta(hours=1)), ""))
+        con.commit()
+        con.close()
+        with patch.object(settings, "temporal_pattern_detection_enabled", True):
+            out = HS.search("how many times did the front door open today")
+        assert out.startswith("1 opening")
+        assert _looks_empty(out) is False

@@ -427,7 +427,7 @@ SOURCE_DESCRIPTIONS = {
     "uptime": "Uptime Kuma monitor status. Use when asked about service status, what is down, or network health.",
     "ha": "Home Assistant entity states. Use for house status summaries, which lights are on, door and lock status, battery levels, indoor sensors, motion events, or power consumption.",
     "changes": "Snapshot diff engine. Use when asked what changed, any new outages, weather changes, or new news since a given time.",
-    "history": "Recorded history of the house's own sensors and services — temperature, CO2, humidity, power, service uptime, and door/motion events over time. Use for questions about past values, highs/lows, averages, counts, or trends.",
+    "history": "Recorded readings from THIS house's own sensors and services only — temperature, CO2, humidity, power, service uptime, and door/motion events over time. Use for questions about this home's past sensor values, highs/lows, averages, counts, or sensor trends. NOT for world history, general knowledge, news, or public/industry trends.",
     "fusion": "Multi-source fusion — queries multiple sources concurrently and merges results. Use for complex queries that benefit from combining offline knowledge, live web, and recent news.",
 }
 
