@@ -230,3 +230,55 @@ class TestFusionProperties:
         from app.sources.fusion import _deduplicate
         result = _deduplicate(results)
         assert isinstance(result, dict)
+
+
+class TestHistoryAggregationProperties:
+    """Property tests for the History aggregation engine (Design Doc 5 §9).
+
+    aggregate_series / compute_trend take arbitrary numeric series and must
+    never crash, and their invariants (min ≤ avg ≤ max; a constant series
+    is flat, never a fabricated direction) must hold for any input.
+    """
+
+    def _series(self, values):
+        from app.history import Sample
+        from datetime import datetime, timezone, timedelta
+        base = datetime(2026, 6, 1, tzinfo=timezone.utc)
+        return [Sample(float(v), (base + timedelta(hours=i)).strftime("%Y-%m-%dT%H:%M:%SZ"))
+                for i, v in enumerate(values)]
+
+    @given(st.lists(st.floats(allow_nan=False, allow_infinity=False,
+                              min_value=-1e6, max_value=1e6),
+                    min_size=0, max_size=200))
+    @settings(max_examples=200)
+    def test_aggregate_series_never_crashes(self, values):
+        from app.history import aggregate_series
+        result = aggregate_series(self._series(values))
+        if not values:
+            assert result is None
+        else:
+            # minimum <= maximum always holds exactly; the average can sit
+            # one ULP outside [min, max] for a constant large-magnitude
+            # series (total/n rounding), so allow a proportional epsilon.
+            assert result.minimum <= result.maximum
+            tol = abs(result.maximum) * 1e-9 + 1e-9
+            assert result.minimum - tol <= result.average <= result.maximum + tol
+
+    @given(st.lists(st.floats(allow_nan=False, allow_infinity=False,
+                              min_value=-1e6, max_value=1e6),
+                    min_size=0, max_size=200))
+    @settings(max_examples=200)
+    def test_compute_trend_never_crashes(self, values):
+        from app.history import compute_trend
+        t = compute_trend(self._series(values), min_samples=12, min_delta_fraction=0.1)
+        assert t.status in ("rising", "falling", "flat", "insufficient")
+
+    @given(st.floats(allow_nan=False, allow_infinity=False, min_value=-1e6, max_value=1e6),
+           st.integers(min_value=12, max_value=100))
+    @settings(max_examples=100)
+    def test_constant_series_is_never_a_direction(self, value, n):
+        from app.history import compute_trend
+        t = compute_trend(self._series([value] * n), min_samples=12, min_delta_fraction=0.1)
+        # A perfectly constant series must be flat — never a fabricated
+        # rising/falling call.
+        assert t.status == "flat"

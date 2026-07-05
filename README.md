@@ -25,6 +25,7 @@ A homelab accumulates real, distinct sources of truth — your own RSS feeds, an
 | `uptime` | [Uptime Kuma](https://uptime.kuma.pet/) | Service monitor status — reports any down services |
 | `ha` | [Home Assistant](https://www.home-assistant.io/) | Entity state summaries — lights, locks, sensors, motion, batteries, power |
 | `changes` | Snapshot Engine | Detected changes since last snapshot — outages, weather shifts, new headlines |
+| `history` | [History Engine](https://github.com/immortalbob/Mnemolis/wiki/History-and-Trends) | Recorded time series over the house's own sensors/services — highs, lows, averages, counts, trends. Off by default (`HISTORY_ENABLED`) |
 | `fusion` | — | Query multiple sources concurrently and merge results |
 | `auto` | — | Mnemolis detects intent and picks the best source |
 
@@ -137,6 +138,15 @@ All settings are passed as environment variables in `docker-compose.yml`:
 | `CACHE_TTL_HA_SECONDS` | Result cache TTL for `ha` | `30` |
 | `CACHE_TTL_CHANGES_SECONDS` | Result cache TTL for `changes` | `120` |
 | `CACHE_TTL_FUSION_SECONDS` | Result cache TTL for `fusion` | `1800` |
+| `CACHE_TTL_HISTORY_SECONDS` | Result cache TTL for `history` | `300` |
+| `HISTORY_ENABLED` | Master switch for the [History source](https://github.com/immortalbob/Mnemolis/wiki/History-and-Trends) — records the numeric sensors the snapshot jobs already fetch into a time series and answers highs/lows/averages/counts/trends. Ingestion rides inside `snapshot_ha`/`snapshot_uptime` (their cadence, zero added load — there is deliberately no interval knob). Off by default (has an on-disk cost); opt in per the standard rollout contract | `false` |
+| `HISTORY_RETENTION_DAYS` | Samples older than this are pruned in the sampler tick. ~40 numeric entities ≈ 60–80 MB at 90 days; cost scales linearly with tracked-entity count | `90` |
+| `HISTORY_DEVICE_CLASSES` | Comma-separated HA device_classes the sampler keeps. `battery` is included on purpose (draining-battery questions for free); use `HISTORY_EXCLUDE_ENTITIES` to drop button-cell noise | `temperature,humidity,carbon_dioxide,power,energy,illuminance,pressure,battery` |
+| `HISTORY_EXTRA_ENTITIES` | Allowlist of unclassified numeric sensors worth recording — comma-separated entity IDs | _(blank)_ |
+| `HISTORY_EXCLUDE_ENTITIES` | Denylist of entity IDs the sampler must never keep even if they pass the device-class filter | _(blank)_ |
+| `HISTORY_TREND_MIN_SAMPLES` | A trend claim needs at least this many real samples in the window; below it, the answer reports the summary and says the window's too short to call a direction | `12` |
+| `HISTORY_TREND_MIN_DELTA` | Per-window, unit-free noise floor: a slope only counts as a trend when the fitted change clears this fraction of the window's own observed value range | `0.1` |
+| `HISTORY_STALE_GRACE_MULTIPLIER` | How many multiples of the sampler interval can pass before `/health` flags the history job "stale" | `3` |
 | `FORECAST_LATITUDE` | Forecast location latitude — required for `forecast` to work at all; leaving it unset correctly reports `forecast` as not configured rather than returning weather for the wrong place | _(unset)_ |
 | `FORECAST_LONGITUDE` | Forecast location longitude — same requirement as above | _(unset)_ |
 | `FORECAST_LOCATION_NAME` | Human-readable location name | _(blank)_ |

@@ -249,3 +249,153 @@ class TestLocalTimezoneSetting:
         from app.config import Settings
         s = Settings(local_timezone="Asia/Tokyo")
         assert s.local_timezone == "Asia/Tokyo"
+
+
+class TestResolveWindow:
+    """Tests for resolve_window() — the single owner of natural-language
+    window resolution shared by `changes` and `history` (Design Doc 5).
+
+    The first block PINS the changes-compatible byte-identity: the exact
+    floats _resolve_changes_hours() returned for every phrase it handled
+    before the extraction must survive on WindowResolution.hours. The
+    second block exercises the genuinely new BOUNDED phrases the extraction
+    added for `history`, including DST correctness via an injected `now`.
+    """
+    from datetime import datetime, timezone, timedelta
+
+    def _rw(self, q, now=None):
+        from app.timeutil import resolve_window
+        return resolve_window(q, now=now)
+
+    # --- byte-identity of the phrases changes already resolved ---
+
+    def test_explicit_hours(self):
+        assert self._rw("changes in the last 3 hours").hours == 3.0
+
+    def test_today_is_24(self):
+        assert self._rw("what changed today").hours == 24.0
+
+    def test_yesterday_is_48(self):
+        assert self._rw("since yesterday").hours == 48.0
+
+    def test_week_is_168(self):
+        assert self._rw("this week").hours == 168.0
+
+    def test_default_is_24(self):
+        assert self._rw("any new outages").hours == 24.0
+
+    def test_explicit_hours_beats_calendar_word(self):
+        assert self._rw("today in the last 2 hours").hours == 2.0
+
+    def test_this_morning_positive(self):
+        assert self._rw("what changed this morning").hours > 0
+
+    # --- new bounded phrases ---
+
+    def test_last_n_days(self):
+        from datetime import datetime, timezone
+        now = datetime(2026, 6, 15, 12, 0, 0, tzinfo=timezone.utc)
+        assert self._rw("over the last 3 days", now=now).hours == 72.0
+
+    def test_last_night_is_bounded(self):
+        from datetime import datetime, timezone
+        now = datetime(2026, 6, 15, 9, 0, 0, tzinfo=timezone.utc)
+        r = self._rw("how cold did it get last night", now=now)
+        assert r.label == "last night"
+        # end (this morning) is strictly before now; start is the prior evening
+        assert r.start < r.end <= now
+
+    def test_yesterday_morning_bounded_not_48(self):
+        from datetime import datetime, timezone
+        now = datetime(2026, 6, 15, 12, 0, 0, tzinfo=timezone.utc)
+        r = self._rw("yesterday morning", now=now)
+        assert r.label == "yesterday morning"
+        # the more specific phrase must NOT fall through to bare-yesterday 48h
+        assert r.hours != 48.0
+
+    def test_over_the_weekend_label(self):
+        from datetime import datetime, timezone
+        now = datetime(2026, 6, 15, 12, 0, 0, tzinfo=timezone.utc)  # a Monday
+        r = self._rw("what happened over the weekend", now=now)
+        assert r.label == "over the weekend"
+
+    def test_since_weekday_label(self):
+        from datetime import datetime, timezone
+        now = datetime(2026, 6, 18, 12, 0, 0, tzinfo=timezone.utc)  # Thursday
+        r = self._rw("since monday", now=now)
+        assert r.label.startswith("since")
+
+    def test_all_windows_return_utc_aware_datetimes(self):
+        from datetime import timezone
+        r = self._rw("office co2 today")
+        assert r.start.tzinfo is not None
+        assert r.end.tzinfo is not None
+        # normalized to UTC
+        assert r.start.utcoffset() == timezone.utc.utcoffset(None)
+
+    def test_dst_correctness_across_spring_forward(self):
+        # US spring-forward 2026: 2026-03-08 02:00 local. Query "this
+        # morning" just after the transition should give a positive,
+        # sane hours value regardless of the skipped hour.
+        from datetime import datetime, timezone
+        from unittest.mock import patch
+        with patch("app.timeutil.settings") as msettings:
+            msettings.local_timezone = "America/Los_Angeles"
+            msettings.morning_start_hour = 6
+            msettings.work_start_hour = 9
+            now = datetime(2026, 3, 8, 17, 0, 0, tzinfo=timezone.utc)  # 09:00 PST-ish
+            r = self._rw("what changed this morning", now=now)
+        assert r.hours > 0
+
+
+class TestResolveWindowAuditRegressions:
+    """Pins for the post-implementation audit findings in resolve_window."""
+
+    def _rw(self, q, now=None):
+        from app.timeutil import resolve_window
+        return resolve_window(q, now=now)
+
+    def test_bare_sun_does_not_mean_sunday(self):
+        from datetime import datetime, timezone
+        now = datetime(2026, 6, 17, 18, 0, 0, tzinfo=timezone.utc)  # Wednesday
+        r = self._rw("is the sun out today", now=now)
+        assert r.label == "today"
+        assert r.hours == 24.0
+
+    def test_bare_sat_does_not_mean_saturday(self):
+        from datetime import datetime, timezone
+        now = datetime(2026, 6, 17, 18, 0, 0, tzinfo=timezone.utc)
+        r = self._rw("the cat sat on the sensor", now=now)
+        assert "Sat" not in r.label
+
+    def test_prefixed_abbreviation_still_works(self):
+        from datetime import datetime, timezone
+        now = datetime(2026, 6, 17, 18, 0, 0, tzinfo=timezone.utc)  # Wednesday
+        r = self._rw("what happened since mon", now=now)
+        assert r.label == "since Mon"
+
+    def test_last_friday_on_a_friday_means_a_week_ago(self):
+        from datetime import datetime, timezone
+        fri = datetime(2026, 6, 19, 18, 0, 0, tzinfo=timezone.utc)
+        r = self._rw("how cold was it last friday", now=fri)
+        assert r.hours > 150  # ~7 days back, not this morning
+
+    def test_since_friday_on_a_friday_means_today(self):
+        from datetime import datetime, timezone
+        fri = datetime(2026, 6, 19, 18, 0, 0, tzinfo=timezone.utc)
+        r = self._rw("what happened since friday", now=fri)
+        assert r.hours < 30
+
+    def test_this_afternoon_anchors_at_noon(self):
+        from datetime import datetime, timezone
+        # 15:00 UTC-as-local -> 3 hours since noon, and its own label.
+        now = datetime(2026, 6, 17, 15, 0, 0, tzinfo=timezone.utc)
+        r = self._rw("what changed this afternoon", now=now)
+        assert r.label == "this afternoon"
+        assert 2.5 < r.hours < 3.5
+
+    def test_this_evening_still_anchors_at_18(self):
+        from datetime import datetime, timezone
+        now = datetime(2026, 6, 17, 20, 0, 0, tzinfo=timezone.utc)
+        r = self._rw("what changed this evening", now=now)
+        assert r.label == "this evening"

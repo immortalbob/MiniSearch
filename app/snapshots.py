@@ -539,6 +539,16 @@ def snapshot_uptime():
         result = search("are all services up")
         _store_snapshot("uptime", result)
         _LOGGER.debug("Uptime snapshot stored")
+
+        # Same piggyback contract as snapshot_ha: the history sampler
+        # derives its services_up/services_total pair from the text this
+        # job just fetched, never from a fetch of its own.
+        if settings.history_enabled:
+            try:
+                from app import history
+                history.ingest_uptime_text(result)
+            except Exception as e:
+                _LOGGER.warning("history ingest (uptime) failed: %s", e)
     except Exception as e:
         _LOGGER.warning("Uptime snapshot failed: %s", e)
 
@@ -603,6 +613,18 @@ def snapshot_ha():
 
         _store_snapshot("ha", json.dumps(relevant))
         _LOGGER.debug("HA snapshot stored — %d relevant entities", len(relevant))
+
+        # Hand the SAME states payload to the history sampler (Design Doc
+        # 5, constraint #1: history piggybacks on this fetch and adds zero
+        # HA load of its own). Gated here AND inside ingest_ha_states —
+        # the registration-time + in-function double-check pattern — and
+        # isolated so a history failure can never fail the snapshot.
+        if settings.history_enabled:
+            try:
+                from app import history
+                history.ingest_ha_states(states)
+            except Exception as e:
+                _LOGGER.warning("history ingest (ha) failed: %s", e)
     except Exception as e:
         _LOGGER.warning("HA snapshot failed: %s", e)
 

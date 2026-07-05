@@ -44,7 +44,9 @@ shared with Self-Healing Source Selection, Ambient Intent Disambiguation's
 own time-of-day signal) should import from here, not reimplement this.
 """
 import logging
-from datetime import datetime, timezone
+import re
+from datetime import datetime, timedelta, timezone
+from typing import NamedTuple
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from app.config import settings
@@ -165,3 +167,251 @@ def local_day_of_week(timestamp: str) -> int:
     project would then need to remember and document separately).
     """
     return utc_string_to_local(timestamp).weekday()
+
+
+# ---------------------------------------------------------------------------
+# Shared natural-language window resolution — the one owner (Design Doc 5)
+# ---------------------------------------------------------------------------
+#
+# This is the payoff this module's own docstring named as the reason it
+# exists: "shared groundwork for time-of-day-aware features". Both the
+# `changes` source (app/router.py's _resolve_changes_hours(), which
+# resolves "this morning" / "while at work" / "yesterday" into a
+# hours-since window) and the new `history` source need to turn the same
+# family of natural-language phrases into a time window. Before this,
+# _resolve_changes_hours() was the only owner and returned a bare float
+# (hours-since-now) — enough for `changes`, which only ever looks backward
+# from now, but not for `history`, which needs genuinely BOUNDED windows
+# ("last night" is 18:00 yesterday → this morning, not "the last N hours").
+#
+# resolve_window() is that single owner. It returns a real, bounded
+# (start, end) pair in UTC plus a human label, and carries the exact
+# hours-since float on the same object so _resolve_changes_hours() can
+# keep returning byte-identical values for every phrase it already
+# supported — the extraction is behavior-preserving by construction (the
+# canonical float is stored, never re-derived from the timedelta, so no
+# microsecond re-rounding can drift it). New bounded phrases ("last
+# night", "yesterday morning/evening", "last N days", "over the weekend",
+# weekday names) were then added ON TOP of that preserved core; they
+# enrich `history` and, where they co-occur with a `changes` trigger,
+# `changes` too, without disturbing any phrase `changes` already resolved.
+#
+# Deliberately NOT reworked here: bare "this week"/"week" stays 168h
+# rolling rather than snapping to the local Monday. Design Doc 5 §5
+# floated local-Monday semantics for "this week", but `changes` routes on
+# a substring trigger ("what changed") and then resolves the WHOLE query,
+# so silently changing what "this week" means would change the shipped,
+# regression-pinned behavior of "what changed this week" (168h). Keeping
+# it rolling protects that pin; a future local-Monday "this week" for
+# history would need its own opt-in path, not a change to this shared
+# owner. Recorded here so the next person doesn't re-litigate it.
+
+# The exact "explicit hour count" regex _resolve_changes_hours() used —
+# lifted verbatim so the extraction can't drift it. Requires a real
+# window phrase (last/past/in) immediately before the number rather than
+# matching any number near the word "hour" (the "3 hour delay flight" /
+# "24 hour clock display" false positives that pass had already ruled
+# out; see test_router.py's TestResolveChangesHours regression cases).
+_EXPLICIT_HOURS_RE = re.compile(
+    r"(?:last|past|in the last|in the past|within the last)\s*(\d+)\s*hour"
+)
+# The "last/past N days" analogue — a genuinely new bounded phrase
+# `changes` never resolved (it has no "day" branch), so adding it here
+# can't regress any pinned `changes` value. "day" is a distinct word from
+# "hour", and the explicit-hours check runs first, so "in the last 3
+# hours" is never misread as a day count.
+_EXPLICIT_DAYS_RE = re.compile(
+    r"(?:last|past|in the last|in the past|within the last)\s*(\d+)\s*day"
+)
+
+# Weekday names → Python weekday() index (Monday=0). Full names match on
+# a bare word boundary; abbreviations match ONLY when prefixed by a real
+# window word (since/on/last/this) — an audit fix, because "sat" and
+# "sun" are ordinary English words and bare matching made "is the sun out
+# today" resolve to "since Sunday", hijacking the query's own "today".
+_WEEKDAYS_FULL = {
+    "monday": 0, "tuesday": 1, "wednesday": 2, "thursday": 3,
+    "friday": 4, "saturday": 5, "sunday": 6,
+}
+_WEEKDAYS_ABBREV = {
+    "mon": 0, "tue": 1, "tues": 1, "wed": 2, "thu": 3, "thur": 3,
+    "thurs": 3, "fri": 4, "sat": 5, "sun": 6,
+}
+
+
+class WindowResolution(NamedTuple):
+    """A resolved natural-language time window.
+
+    start / end are timezone-aware UTC datetimes — the project's storage
+    convention, so a consumer querying a UTC-ISO `ts` column can format
+    these directly. label is the human phrase to echo back ("past 24
+    hours", "last night"). hours is the hours-since-`start` float, carried
+    so `changes` (which only ever looks backward from now) gets a value
+    byte-identical to the pre-extraction _resolve_changes_hours() for
+    every phrase it already handled — it is the CANONICAL value used to
+    build a rolling window's start, never re-derived from (end - start),
+    precisely so floating-point re-rounding can't drift it.
+    """
+    start: datetime
+    end: datetime
+    label: str
+    hours: float
+
+
+def _clamp_hours(hours: float) -> float:
+    """Avoid zero/negative windows — the exact guard _hours_since() applied."""
+    return max(hours, 0.1)
+
+
+def resolve_window(query: str, now: datetime | None = None) -> WindowResolution:
+    """Resolve a natural-language time-window phrase into a bounded
+    (start_utc, end_utc, label) window, plus the hours-since-start float.
+
+    Phrases are checked most-specific-first so a compound phrase ("last
+    night", "yesterday morning") is never shadowed by a broader one
+    ("yesterday") that happens to be a substring of it — the same
+    ordering discipline _resolve_changes_hours() already used.
+
+    `now` is injectable purely so tests can pin a fixed local clock across
+    DST boundaries (the test_timeutil.py house style); production callers
+    pass nothing and get datetime.now(UTC). Local-time reasoning ("last
+    night", "in the evenings") goes through _resolve_zone() /
+    LOCAL_TIMEZONE exactly like every other time-of-day feature; storage
+    stays UTC.
+    """
+    zone = _resolve_zone()
+    if now is None:
+        now_utc = datetime.now(timezone.utc)
+    else:
+        # Accept either an aware datetime (used as-is) or a naive one
+        # (interpreted as UTC — the project's storage convention), so a
+        # test can pass a plain datetime without ceremony.
+        now_utc = now if now.tzinfo is not None else now.replace(tzinfo=timezone.utc)
+    now_local = now_utc.astimezone(zone)
+    q = query.lower()
+
+    def rolling(hours: float, label: str) -> WindowResolution:
+        """A window that ends at now and looks back `hours` — the shape
+        every phrase `changes` already supported produces. `hours` is the
+        canonical value; start is derived from it, so .hours round-trips
+        exactly."""
+        h = _clamp_hours(hours)
+        return WindowResolution(now_utc - timedelta(hours=h), now_utc, label, h)
+
+    def bounded(start_local: datetime, end_local: datetime, label: str) -> WindowResolution:
+        """A genuinely bounded window (end may be well before now). hours
+        is (now - start) so a `changes`-style caller that co-matched this
+        phrase still gets a sensible 'since the window opened' lookback
+        rather than a window that mysteriously ends in the past."""
+        start_utc = start_local.astimezone(timezone.utc)
+        end_utc = end_local.astimezone(timezone.utc)
+        hours = _clamp_hours((now_utc - start_utc).total_seconds() / 3600)
+        return WindowResolution(start_utc, end_utc, label, hours)
+
+    def local_hour_today(hour: int) -> datetime:
+        """Local wall-clock `hour` today, as an aware local datetime."""
+        return now_local.replace(hour=hour % 24, minute=0, second=0, microsecond=0)
+
+    def hours_since_local_hour(hour: int) -> float:
+        """The exact _hours_since() computation, now DST-correct by working
+        in aware local time: elapsed hours since `hour` o'clock today, or
+        yesterday's occurrence if that hour hasn't happened yet today."""
+        target = local_hour_today(hour)
+        if target > now_local:
+            target -= timedelta(days=1)
+        return _clamp_hours((now_local - target).total_seconds() / 3600)
+
+    # 1. Explicit "last/past N hours" — highest priority, wins over any
+    #    calendar word also present ("today in the last 2 hours" -> 2h).
+    if "hour" in q:
+        m = _EXPLICIT_HOURS_RE.search(q)
+        if m:
+            n = float(m.group(1))
+            return rolling(n, f"past {m.group(1)} hours")
+
+    # 2. Explicit "last/past N days" (new bounded-ish rolling phrase).
+    if "day" in q:
+        m = _EXPLICIT_DAYS_RE.search(q)
+        if m:
+            n = int(m.group(1))
+            return rolling(n * 24.0, f"past {n} day{'s' if n != 1 else ''}")
+
+    # 3. "last night" — the flagship new BOUNDED window: previous local
+    #    evening (18:00) through this local morning (morning_start_hour).
+    #    Distinct from "tonight"/"this evening" (which look back to 18:00
+    #    today). Checked before "yesterday"/"night" so it isn't shadowed.
+    if "last night" in q:
+        morning = local_hour_today(settings.morning_start_hour)
+        evening = local_hour_today(18) - timedelta(days=1)
+        return bounded(evening, morning, "last night")
+
+    # 4. "yesterday morning/afternoon/evening" — bounded slices of the
+    #    prior local day. Checked before bare "yesterday" (48h) so the
+    #    more specific phrase wins; bare "yesterday" is unaffected.
+    y_start = local_hour_today(0) - timedelta(days=1)
+    if "yesterday morning" in q:
+        return bounded(y_start.replace(hour=settings.morning_start_hour), y_start.replace(hour=12), "yesterday morning")
+    if "yesterday afternoon" in q:
+        return bounded(y_start.replace(hour=12), y_start.replace(hour=18), "yesterday afternoon")
+    if "yesterday evening" in q or "yesterday night" in q:
+        return bounded(y_start.replace(hour=18), y_start + timedelta(days=1), "yesterday evening")
+
+    # 5. Time-of-day phrases resolved against configured start hours —
+    #    unchanged from _resolve_changes_hours(), now DST-correct.
+    if "this morning" in q or "since morning" in q or "since this morning" in q:
+        return rolling(hours_since_local_hour(settings.morning_start_hour), "since this morning")
+    if "at work" in q or "since work" in q or "while at work" in q or "while i was at work" in q or "while i've been at work" in q:
+        return rolling(hours_since_local_hour(settings.work_start_hour), "since work")
+    if "tonight" in q or "this evening" in q:
+        return rolling(hours_since_local_hour(18), "this evening")
+    # "this afternoon" anchors at noon, not 18:00 (audit fix: the first
+    # cut lumped it in with the evening branch, so a 1 PM "this afternoon"
+    # question looked back to YESTERDAY 18:00 under a mislabeled window).
+    # Not a `changes` byte-identity concern: the pre-3.56.0 resolver had
+    # no afternoon branch at all, so no pinned value existed for it.
+    if "this afternoon" in q:
+        return rolling(hours_since_local_hour(12), "this afternoon")
+
+    # 6. "over the weekend" — bounded window covering the most recent
+    #    Saturday 00:00 through Sunday 24:00 (local). New phrase; no
+    #    `changes` value depended on "weekend".
+    if "weekend" in q:
+        # weekday(): Mon=0 .. Sun=6. Most recent Saturday at-or-before now.
+        days_since_sat = (now_local.weekday() - 5) % 7
+        sat = (now_local - timedelta(days=days_since_sat)).replace(hour=0, minute=0, second=0, microsecond=0)
+        return bounded(sat, sat + timedelta(days=2), "over the weekend")
+
+    # 7. "since {weekday}" / a weekday name — bounded from the most recent
+    #    occurrence of that weekday (00:00 local) through now. Full names
+    #    match bare; abbreviations need a since/on/last/this prefix (see
+    #    _WEEKDAYS_ABBREV's comment). "last {weekday}" when that weekday is
+    #    today means a week ago, not this morning — "last friday" asked on
+    #    a Friday is unambiguous in English (audit fix); bare/"since"
+    #    forms keep meaning today's own 00:00.
+    for name, idx in _WEEKDAYS_FULL.items():
+        m = re.search(r"(?:\b(last|since|on|this)\s+)?\b" + name + r"\b", q)
+        if m:
+            days_back = (now_local.weekday() - idx) % 7
+            if days_back == 0 and m.group(1) == "last":
+                days_back = 7
+            day_start = (now_local - timedelta(days=days_back)).replace(hour=0, minute=0, second=0, microsecond=0)
+            return bounded(day_start, now_local, f"since {name.capitalize()}")
+    for name, idx in _WEEKDAYS_ABBREV.items():
+        m = re.search(r"\b(last|since|on|this)\s+" + name + r"\b", q)
+        if m:
+            days_back = (now_local.weekday() - idx) % 7
+            if days_back == 0 and m.group(1) == "last":
+                days_back = 7
+            day_start = (now_local - timedelta(days=days_back)).replace(hour=0, minute=0, second=0, microsecond=0)
+            return bounded(day_start, now_local, f"since {name.capitalize()}")
+
+    # 8. Broad calendar windows — byte-identical to _resolve_changes_hours().
+    if "yesterday" in q or "since yesterday" in q:
+        return rolling(48.0, "past 48 hours")
+    if "week" in q:
+        return rolling(168.0, "past 7 days")
+    if "today" in q:
+        return rolling(24.0, "today")
+
+    # 9. Default — no specific window detected.
+    return rolling(24.0, "past 24 hours")

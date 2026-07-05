@@ -509,6 +509,7 @@ class Settings(BaseSettings):
     cache_ttl_ha_seconds: int = 30            # 30 seconds
     cache_ttl_changes_seconds: int = 120      # 2 minutes — changes are near-real-time
     cache_ttl_fusion_seconds: int = 1800      # 30 minutes
+    cache_ttl_history_seconds: int = 300      # 5 minutes — the sampler only advances every HISTORY_SAMPLE_INTERVAL_MINUTES anyway
 
     # -------------------------------------------------------------------
     # API key authentication — protects /search and /changes
@@ -636,6 +637,83 @@ class Settings(BaseSettings):
     # the mining interval can pass before /health flags this job
     # "stale" rather than "ok".
     temporal_pattern_stale_grace_multiplier: int = 3
+
+    # -------------------------------------------------------------------
+    # History source — time-series memory for the house (Design Doc 5)
+    # -------------------------------------------------------------------
+    # Master on/off switch, following the exact precedent
+    # TEMPORAL_PATTERN_DETECTION_ENABLED / ADVERSARIAL_TEST_ENABLED
+    # established: checked at both the snapshot-hook call sites AND inside
+    # the ingest functions themselves (defense in depth), and reported as
+    # {"status": "disabled"} directly in /health rather than eventually
+    # reading as stale. Defaulted false for its first release (v3.56.0)
+    # per the standard rollout contract — a deployment opts in only once
+    # it has decided it wants the on-disk cost (see HISTORY_RETENTION_DAYS
+    # and the back-of-envelope math on the wiki's History-and-Trends page).
+    history_enabled: bool = False
+
+    # NOTE (audit): there is deliberately NO sampling-interval setting.
+    # History has no fetch of its own to schedule — it ingests inside
+    # snapshot_ha()/snapshot_uptime(), riding the fetches those jobs
+    # already make, so its cadence IS theirs (JOB_INTERVALS_MINUTES:
+    # HA metrics every 5 minutes, uptime counts every 2). A knob here
+    # would be a lie: it couldn't change when data actually arrives.
+
+    # Explicit retention with pruning in the sampler tick. Back-of-envelope
+    # (documented on the wiki page): ~40 numeric entities × 288 samples/day
+    # × 90 days ≈ 1M rows ≈ 60–80 MB — comfortable on MiniDock. A larger
+    # deployment (400+ entities) should either lower this or lean on
+    # HISTORY_EXCLUDE_ENTITIES / HISTORY_DEVICE_CLASSES to bound the row
+    # count, since the cost scales linearly with tracked-entity count.
+    history_retention_days: int = 90
+
+    # Which HA device_classes the sampler keeps. A numeric sensor whose
+    # device_class is in this set (and whose state parses as a float, and
+    # isn't excluded) is sampled every tick. `battery` is included on
+    # purpose (it's already in the snapshot diff path for low-battery
+    # alerts, so sampling it gives "how fast is the T7S3 battery draining"
+    # for free) — the catalog noise from every button-cell device is the
+    # deliberate cost, handled by HISTORY_EXCLUDE_ENTITIES rather than by
+    # omitting a genuinely useful class for everyone.
+    history_device_classes: str = "temperature,humidity,carbon_dioxide,power,energy,illuminance,pressure,battery"
+
+    # Explicit allowlist for numeric sensors that carry NO device_class
+    # (or an unclassified one) but are still worth recording — e.g. a
+    # custom template sensor. Entity IDs, comma-separated. Empty by
+    # default: an unclassified sensor is not sampled unless named here.
+    history_extra_entities: str = ""
+
+    # Explicit denylist — entity IDs the sampler must never keep even if
+    # they pass the device-class filter. This is the escape hatch for the
+    # battery-noise cost above, and for any high-cardinality or
+    # uninteresting sensor a deployment would rather not spend rows on.
+    history_exclude_entities: str = ""
+
+    # A trend claim ("rising"/"falling") requires at least this many real
+    # samples in the window before it's ever asserted — the temporal
+    # miner's min-occurrences discipline (TEMPORAL_PATTERN_MIN_OCCURRENCES)
+    # applied to slopes. Below this the aggregation reports the summary
+    # (min/max/avg/latest) and says the window is too short to call a
+    # trend, rather than fitting a slope to three points and calling it a
+    # direction.
+    history_trend_min_samples: int = 12
+
+    # A slope only counts as a real trend (not "roughly flat") when its
+    # total change across the window clears this fraction of the window's
+    # own observed value range. 0.1 = the endpoints must differ by at
+    # least 10% of (max - min) seen in the window. This is a per-window,
+    # unit-free noise floor: it adapts to whatever the sensor's natural
+    # spread is rather than hardcoding a per-unit threshold, so the same
+    # setting behaves sensibly for CO2 (ppm) and temperature (°) alike.
+    # "roughly flat" is a finding, not a shrug — see the wiki page.
+    history_trend_min_delta: float = 0.1
+
+    # Same role as SNAPSHOT_STALE_GRACE_MULTIPLIER: how many multiples of
+    # the sampler's own interval can pass before /health flags the history
+    # job "stale" rather than "ok". Generous enough to absorb normal
+    # scheduler jitter at the default 5-minute cadence (flagged after ~15
+    # minutes of silence, not one delayed tick).
+    history_stale_grace_multiplier: int = 3
 
 
 settings = Settings()

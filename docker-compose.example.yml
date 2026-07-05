@@ -87,6 +87,22 @@ services:
       TEMPORAL_PATTERN_DETECTION_ENABLED: "true"
       ADVERSARIAL_TEST_ENABLED: "false"       # opt-in; POST /adversarial/trigger runs one cycle on demand regardless
       ADVERSARIAL_TEST_INTERVAL_MINUTES: "60"
+      # History source: records the numeric sensors the snapshot path
+      # already fetches (temperature, CO2, humidity, power, uptime) into a
+      # time series and answers highs/lows/averages/counts/trends. Off by
+      # default because it has an on-disk cost (see HISTORY_RETENTION_DAYS
+      # and the wiki's History-and-Trends page). The event-count leg reads
+      # temporal_events, so counts ("how many times did the door open")
+      # need TEMPORAL_PATTERN_DETECTION_ENABLED too. There is no sampling
+      # interval to set: ingestion rides inside the HA (5 min) and uptime
+      # (2 min) snapshot jobs, consuming the payloads they already fetch.
+      HISTORY_ENABLED: "false"
+      HISTORY_RETENTION_DAYS: "90"            # ~40 numeric entities ≈ 60–80 MB at 90 days; scales linearly with entity count
+      HISTORY_DEVICE_CLASSES: "temperature,humidity,carbon_dioxide,power,energy,illuminance,pressure,battery"
+      HISTORY_EXTRA_ENTITIES: ""              # allowlist: unclassified sensors worth recording, comma-separated entity_ids
+      HISTORY_EXCLUDE_ENTITIES: ""            # denylist: e.g. noisy button-cell battery sensors you don't want to store
+      HISTORY_TREND_MIN_SAMPLES: "12"         # below this, no trend is asserted (says the window's too short instead)
+      HISTORY_TREND_MIN_DELTA: "0.1"          # a slope must clear 10% of the window's own value range to count as a trend
       # Security — comma-separated API keys. Blank = no auth (open on your
       # LAN). Set one or more keys to require them on every request.
       API_KEYS: ""

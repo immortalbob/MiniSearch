@@ -4988,3 +4988,90 @@ class TestRouteQuerySynthesis:
         assert outcome.result == raw
         assert outcome.answer is None
         assert outcome.synthesized is False
+
+
+class TestHistoryRouting:
+    """Routing integration for the History source (Design Doc 5).
+
+    Pins that history triggers reach the source, that history and changes
+    stay deliberately non-overlapping (the census), and that the source is
+    registered in every map a routable source needs — with NO fallback
+    entry, since no other source can answer recorded history.
+    """
+
+    def test_history_triggers_route_to_history(self):
+        from app.router import detect_intent
+        for q in ["how many times did the door open today",
+                  "average temperature today",
+                  "has the office co2 been rising",
+                  "how cold did it get last night"]:
+            assert detect_intent(q) == "history", q
+
+    def test_what_changed_stays_changes(self):
+        from app.router import detect_intent
+        assert detect_intent("what changed today") == "changes"
+
+    def test_encyclopedic_history_stays_kiwix(self):
+        # The reason bare "history" is NOT a trigger.
+        from app.router import detect_intent
+        assert detect_intent("tell me about the history of ancient rome") == "kiwix"
+
+    def test_history_and_changes_triggers_do_not_overlap(self):
+        """The census: no trigger phrase is shared between history and
+        changes, so the deliberate adjacency never becomes ambiguity."""
+        from app.router import INTENT_MAP
+        history = set(INTENT_MAP["history"])
+        changes = set(INTENT_MAP["changes"])
+        assert history.isdisjoint(changes), history & changes
+
+    def test_history_registered_in_source_map(self):
+        from app.router import SOURCE_MAP
+        assert "history" in SOURCE_MAP
+        assert callable(SOURCE_MAP["history"])
+
+    def test_history_has_cache_ttl(self):
+        from app.router import CACHE_TTL
+        assert "history" in CACHE_TTL
+        assert CACHE_TTL["history"] > 0
+
+    def test_history_has_source_description(self):
+        from app.router import SOURCE_DESCRIPTIONS
+        assert "history" in SOURCE_DESCRIPTIONS
+        assert len(SOURCE_DESCRIPTIONS["history"]) > 0
+
+    def test_history_has_no_fallback_entry(self):
+        from app.router import FALLBACK_CHAIN
+        assert "history" not in FALLBACK_CHAIN
+
+    def test_history_appears_in_sources_list(self):
+        # /sources returns SOURCE_MAP keys; history must be routable.
+        from app.router import SOURCE_MAP
+        assert "history" in list(SOURCE_MAP.keys())
+
+
+class TestHistoryRoutingAuditRegressions:
+    """Pins for the audit's trigger-narrowing: _keyword_detect is a
+    substring match, so the doc's broad triggers hijacked general-knowledge
+    and news queries. These must never route to history on keywords."""
+
+    def test_general_knowledge_counts_do_not_route_to_history(self):
+        from app.router import _keyword_detect
+        for q in ["how many times has brazil won the world cup",
+                  "how often should i water succulents",
+                  "how many times does the earth rotate in a year"]:
+            matched = _keyword_detect(q)
+            sources = matched if isinstance(matched, list) else [matched]
+            assert "history" not in sources, q
+
+    def test_trend_and_over_the_past_are_not_triggers(self):
+        from app.router import _keyword_detect
+        for q in ["what are the latest AI trends",
+                  "how has the climate changed over the past century"]:
+            matched = _keyword_detect(q)
+            sources = matched if isinstance(matched, list) else [matched]
+            assert "history" not in sources, q
+
+    def test_past_tense_household_counts_still_route(self):
+        from app.router import detect_intent
+        assert detect_intent("how many times did the front door open today") == "history"
+        assert detect_intent("how often was the office occupied yesterday") == "history"

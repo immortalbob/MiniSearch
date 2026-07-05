@@ -10,7 +10,7 @@ from contextlib import asynccontextmanager, AsyncExitStack, closing
 from typing import Optional
 
 from apscheduler.schedulers.background import BackgroundScheduler
-from fastapi import FastAPI, Header, HTTPException, Depends
+from fastapi import FastAPI, Header, HTTPException, Depends, Query
 from fastapi.responses import FileResponse
 from starlette.background import BackgroundTask
 from starlette.routing import Mount
@@ -57,6 +57,12 @@ from app.temporal_patterns import (
     run_temporal_pattern_mining_cycle,
     get_temporal_pattern_summary,
     get_temporal_patterns,
+)
+from app.history import (
+    init_history_db,
+    get_history_job_health,
+    get_metrics_overview,
+    fetch_samples,
 )
 from app.config import settings
 
@@ -132,6 +138,7 @@ _BACKUP_DATA_FILES = [
     "/app/data/snapshots.db",
     "/app/data/adversarial_testing.db",
     "/app/data/temporal_patterns.db",
+    "/app/data/history.db",
 ]
 
 
@@ -303,6 +310,8 @@ async def lifespan(app: FastAPI):
             await loop.run_in_executor(None, init_adversarial_db)
         if settings.temporal_pattern_detection_enabled:
             await loop.run_in_executor(None, init_temporal_patterns_db)
+        if settings.history_enabled:
+            await loop.run_in_executor(None, init_history_db)
 
         # Warm the persistent Uptime Kuma connection (if configured) before
         # the scheduler starts -- connects and logs in once here, during
@@ -346,6 +355,14 @@ async def lifespan(app: FastAPI):
             )
         else:
             _LOGGER.info("Temporal pattern detection is disabled (TEMPORAL_PATTERN_DETECTION_ENABLED=false); scheduler job not registered")
+        # NOTE: history has NO scheduler job of its own — it ingests
+        # inside snapshot_ha()/snapshot_uptime(), riding the fetches those
+        # jobs already make (Design Doc 5 constraint #1: zero additional
+        # HA/uptime load). init_history_db() above is its only startup
+        # step; the first ingest happens on the immediate snapshot calls
+        # below.
+        if not settings.history_enabled:
+            _LOGGER.info("History source is disabled (HISTORY_ENABLED=false); snapshot jobs will not ingest samples")
         scheduler.start()
         _LOGGER.info("Snapshot scheduler started")
 
@@ -371,7 +388,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Mnemolis",
     description="Unified local knowledge search API with multi-source fusion. Routes queries to Kiwix, Open-Meteo, FreshRSS, SearXNG, Uptime Kuma, or multiple sources concurrently.",
-    version="3.55.2",
+    version="3.56.0",
     lifespan=lifespan,
 )
 
@@ -568,6 +585,7 @@ def health():
         "snapshot_jobs": get_snapshot_job_health(),
         "adversarial_testing": get_adversarial_test_summary(),
         "temporal_pattern_detection": get_temporal_pattern_summary(),
+        "history": get_history_job_health(),
         "sources": sources,
     }
 
@@ -907,6 +925,51 @@ def areas():
     """
     from app.sources.home_assistant import list_areas
     return list_areas()
+
+
+@app.get("/history/metrics", dependencies=[Depends(require_api_key)])
+def history_metrics():
+    """
+    The recorded-metric catalog with per-metric sample counts and coverage
+    (oldest/newest sample) — the /areas analogue for the History source
+    (Design Doc 5 §6). Under require_api_key: unlike /areas (which only
+    lists room names), this exposes what sensor data has actually been
+    recorded and how much, which is house telemetry worth gating behind
+    the same key /search and /changes already use.
+    """
+    if not settings.history_enabled:
+        return {"status": "disabled", "metric_count": 0, "metrics": []}
+    return get_metrics_overview()
+
+
+@app.get("/history/series", dependencies=[Depends(require_api_key)])
+def history_series(metric: str, hours: int = Query(default=24, ge=1, le=2160)):
+    """
+    Raw (value, ts) series for one metric over the last N hours — the
+    read endpoint a future NOC/device-registry dashboard renders sparklines
+    from (Design Doc 5 §9 names charts a non-goal for the text API but the
+    right renderer is a separate app hitting a raw-series endpoint). Added
+    in v1 deliberately rather than deferred: it's trivial, and shipping it
+    now means the dashboard app doesn't need a follow-up Mnemolis release.
+
+    Returns UTC-ISO timestamps (the storage convention); the caller
+    localizes for display, exactly as the text adapter does.
+    """
+    if not settings.history_enabled:
+        return {"status": "disabled", "metric": metric, "hours": hours, "samples": []}
+    from datetime import datetime, timezone, timedelta
+    from app.timeutil import TIMESTAMP_FORMAT
+    now = datetime.now(timezone.utc)
+    start = (now - timedelta(hours=hours)).strftime(TIMESTAMP_FORMAT)
+    end = now.strftime(TIMESTAMP_FORMAT)
+    samples = fetch_samples(metric, start, end)
+    return {
+        "status": "ok",
+        "metric": metric,
+        "hours": hours,
+        "count": len(samples),
+        "samples": [{"value": s.value, "ts": s.ts} for s in samples],
+    }
 
 
 @app.get("/changes", dependencies=[Depends(require_api_key)])

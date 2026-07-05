@@ -1320,3 +1320,86 @@ class TestLogDbSynthesizedMigration:
             assert "fallback_occurred" in cols
         finally:
             os.unlink(db)
+
+
+class TestHistoryEndpoints:
+    """The /history/metrics and /history/series endpoints, plus the
+    /health `history` block (Design Doc 5 §6/§9). api_keys is empty in the
+    module client, so require_api_key passes through."""
+
+    def test_metrics_disabled_returns_disabled(self, client):
+        from app.config import settings
+        original = settings.history_enabled
+        settings.history_enabled = False
+        try:
+            resp = client.get("/history/metrics")
+        finally:
+            settings.history_enabled = original
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "disabled"
+
+    def test_metrics_enabled_returns_overview(self, client):
+        from app.config import settings
+        original = settings.history_enabled
+        settings.history_enabled = True
+        try:
+            with patch("app.main.get_metrics_overview",
+                       return_value={"status": "ok", "metric_count": 0, "metrics": []}):
+                resp = client.get("/history/metrics")
+        finally:
+            settings.history_enabled = original
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "ok"
+
+    def test_series_disabled(self, client):
+        from app.config import settings
+        original = settings.history_enabled
+        settings.history_enabled = False
+        try:
+            resp = client.get("/history/series", params={"metric": "sensor.x"})
+        finally:
+            settings.history_enabled = original
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "disabled"
+
+    def test_series_enabled_returns_samples(self, client):
+        from app.config import settings
+        from app.history import Sample
+        original = settings.history_enabled
+        settings.history_enabled = True
+        try:
+            with patch("app.main.fetch_samples",
+                       return_value=[Sample(21.0, "2026-06-01T00:00:00Z")]):
+                resp = client.get("/history/series",
+                                  params={"metric": "sensor.x", "hours": 6})
+        finally:
+            settings.history_enabled = original
+        body = resp.json()
+        assert resp.status_code == 200
+        assert body["status"] == "ok"
+        assert body["count"] == 1
+        assert body["samples"][0]["value"] == 21.0
+
+    def test_health_includes_history_block(self, client):
+        resp = client.get("/health")
+        assert resp.status_code == 200
+        assert "history" in resp.json()
+        assert "status" in resp.json()["history"]
+
+
+class TestHistorySeriesBounds:
+    """Audit pin: /history/series rejects nonsensical hour windows —
+    negative/zero hours produced an inverted (empty) window silently, and
+    an unbounded value invited a 90-day full-table scan per request."""
+
+    def test_negative_hours_rejected(self, client):
+        resp = client.get("/history/series", params={"metric": "sensor.x", "hours": -5})
+        assert resp.status_code == 422
+
+    def test_zero_hours_rejected(self, client):
+        resp = client.get("/history/series", params={"metric": "sensor.x", "hours": 0})
+        assert resp.status_code == 422
+
+    def test_absurd_hours_rejected(self, client):
+        resp = client.get("/history/series", params={"metric": "sensor.x", "hours": 999999})
+        assert resp.status_code == 422

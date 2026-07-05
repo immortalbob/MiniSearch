@@ -10,9 +10,10 @@ import tempfile
 import concurrent.futures
 from contextlib import contextmanager, closing
 from typing import Callable, NamedTuple
-from app.sources import kiwix, forecast, freshrss, searxng, uptime_kuma, fusion, home_assistant
+from app.sources import kiwix, forecast, freshrss, searxng, uptime_kuma, fusion, home_assistant, history
 from app.snapshots import get_changes, format_changes
 from app import semantic_routing
+from app.timeutil import resolve_window
 from app.config import settings
 
 _LOGGER = logging.getLogger(__name__)
@@ -292,6 +293,33 @@ INTENT_MAP = {
         "since work", "since this morning", "this morning while",
         "since i left", "since i woke up",
     ],
+    "history": [
+        # Recorded time-series over the house's own sensors/services
+        # (Design Doc 5). Deliberately adjacent to `changes` but
+        # non-overlapping: "what changed today" stays `changes` (a diff
+        # since a time); "how many times did" / "average temperature" /
+        # "how cold did it get" are `history` (an aggregate over recorded
+        # values). The census test pins that non-overlap.
+        #
+        # Bare "history" is deliberately NOT a trigger: it collides with
+        # encyclopedic phrasing ("the history of ancient rome"), which
+        # must stay kiwix. The audit then narrowed the doc's proposed
+        # triggers further, because _keyword_detect is a substring match:
+        # bare "trend"/"trending" hijacked "what are the latest AI
+        # trends" (news/web), "over the past" hijacked "how has the
+        # climate changed over the past century" (kiwix), and
+        # present/perfect count forms hijacked general-knowledge counts
+        # ("how many times HAS brazil won the world cup", "how often
+        # SHOULD i water succulents"). The past-tense forms below carry
+        # the ask-the-house intent without those false positives; trend
+        # questions reach this source via "been rising/falling" or LLM
+        # routing on SOURCE_DESCRIPTIONS.
+        "how many times did", "how many times was", "how many times were",
+        "how often did", "how often was", "how often were",
+        "how cold did it get", "how hot did it get",
+        "average temperature", "average humidity",
+        "last night", "been rising", "been falling",
+    ],
     "uptime": [
         "uptime", "is down", "what's down", "whats down",
         "any outages", "service status", "network status",
@@ -347,59 +375,28 @@ def _hours_since(hour_of_day: int) -> float:
 def _resolve_changes_hours(query: str) -> float:
     """Resolve a changes query into a precise hours-since window.
 
-    Time-window phrases are checked in order of specificity (most specific first)
-    so "this morning while at work" doesn't get misread by a less specific match.
+    Now a thin adapter over timeutil.resolve_window() — the single owner
+    of natural-language window resolution shared with the `history`
+    source (Design Doc 5). This function is unchanged in contract: it
+    still returns a bare hours-since-now float, and every phrase it
+    resolved before the extraction resolves to a byte-identical value
+    (the canonical float is stored on the WindowResolution, not
+    re-derived from its bounded (start, end) — see resolve_window()'s
+    docstring for why that matters for floating-point stability). The
+    complexity-investigation fixes that used to live inline here — the
+    "3 hour delay flight" / "24 hour clock display" false positives that
+    required a real window phrase before the number — now live in
+    resolve_window()'s _EXPLICIT_HOURS_RE, tested by both this function's
+    own regression suite and the shared window suite.
+
+    `changes` also gets, for free, the new bounded phrases resolve_window()
+    added for `history` ("last night", "yesterday morning", "last N days",
+    weekday names): where one co-occurs with a `changes` trigger, it now
+    resolves to a sensible since-the-window-opened lookback instead of the
+    old flat 24h default — an enrichment, not a regression, since none of
+    those phrases was a value any `changes` test pinned.
     """
-    q = query.lower()
-
-    # Explicit hour count — "in the last 3 hours", "in the past 2 hours"
-    #
-    # Found via a deliberate complexity-investigation pass: the original
-    # regex (r"(\d+)\s*hour") matched ANY number adjacent to the word
-    # "hour", regardless of context — a real, reachable compound query
-    # like "any updates on my 3 hour delay flight, also what changed
-    # today" would incorrectly resolve to a 3-hour window from the
-    # unrelated "3 hour delay" phrase, silently ignoring the user's
-    # actual, more relevant "today" signal and searching a window 8x
-    # narrower than intended. Confirmed reachable: this source's
-    # keyword routing is a substring match, not an exact-phrase
-    # requirement, so any query containing a recognized "changes"
-    # trigger anywhere (e.g. "what changed") routes here regardless of
-    # what else the query mentions. Fixed by requiring an actual window
-    # phrase (last/past/in) immediately before the number, rather than
-    # treating any nearby number as a time-window request — verified
-    # this doesn't reject genuine window phrasings ("in the last 3
-    # hours", "in the past 2 hours", "in the last 5 hours or so") while
-    # correctly rejecting both the original false-positive case and a
-    # second one found during the same investigation ("24 hour clock
-    # display").
-    if "hour" in q:
-        m = re.search(r"(?:last|past|in the last|in the past|within the last)\s*(\d+)\s*hour", q)
-        if m:
-            return float(m.group(1))
-
-    # Specific time-of-day phrases — resolved against configured start hours
-    if "this morning" in q or "since morning" in q or "since this morning" in q:
-        return _hours_since(settings.morning_start_hour)
-
-    if "at work" in q or "since work" in q or "while at work" in q or "while i was at work" in q or "while i've been at work" in q:
-        return _hours_since(settings.work_start_hour)
-
-    if "tonight" in q or "this evening" in q:
-        return _hours_since(18)
-
-    # Broader windows
-    if "yesterday" in q or "since yesterday" in q:
-        return 48.0
-
-    if "week" in q:
-        return 168.0
-
-    if "today" in q:
-        return 24.0
-
-    # Default — no specific window detected
-    return 24.0
+    return resolve_window(query).hours
 
 
 def _search_changes(query: str) -> str:
@@ -418,6 +415,7 @@ SOURCE_MAP = {
     "uptime": uptime_kuma.search,
     "ha": home_assistant.search,
     "changes": _search_changes,
+    "history": history.search,
     "fusion": None,  # handled specially in route() — accepts fusion_sources list
 }
 
@@ -429,6 +427,7 @@ SOURCE_DESCRIPTIONS = {
     "uptime": "Uptime Kuma monitor status. Use when asked about service status, what is down, or network health.",
     "ha": "Home Assistant entity states. Use for house status summaries, which lights are on, door and lock status, battery levels, indoor sensors, motion events, or power consumption.",
     "changes": "Snapshot diff engine. Use when asked what changed, any new outages, weather changes, or new news since a given time.",
+    "history": "Recorded history of the house's own sensors and services — temperature, CO2, humidity, power, service uptime, and door/motion events over time. Use for questions about past values, highs/lows, averages, counts, or trends.",
     "fusion": "Multi-source fusion — queries multiple sources concurrently and merges results. Use for complex queries that benefit from combining offline knowledge, live web, and recent news.",
 }
 
@@ -454,6 +453,7 @@ CACHE_TTL = {
     "uptime": settings.cache_ttl_uptime_seconds,
     "ha": settings.cache_ttl_ha_seconds,
     "changes": settings.cache_ttl_changes_seconds,
+    "history": settings.cache_ttl_history_seconds,
     "fusion": settings.cache_ttl_fusion_seconds,
 }
 
